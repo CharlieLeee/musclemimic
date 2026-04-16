@@ -4,9 +4,10 @@
 # correct CUDA wheel for your driver. See csd2smpl/scripts/setup_cluster.sh.
 #
 # Quick reference:
-#   CPU-only:  pip install --index-url https://download.pytorch.org/whl/cpu  torch
-#   CUDA 12.8: pip install --index-url https://download.pytorch.org/whl/cu128 torch
-#              (cu128 wheels run on CUDA 13 drivers via forward compatibility)
+#   CPU-only:     pip install --index-url https://download.pytorch.org/whl/cpu  torch
+#   V100 (sm_70): pip install --index-url https://download.pytorch.org/whl/cu121 "torch==2.5.1"
+#                 (torch 2.8+ dropped Volta; 2.5.1 is the last known-good on V100)
+#   Ampere+:      pip install --index-url https://download.pytorch.org/whl/cu128 torch
 
 numpy>=1.26
 roma>=1.5

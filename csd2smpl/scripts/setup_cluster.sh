@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Set up a Python venv on the cluster for csd2smpl GPU training.
 #
-# Tested with Python 3.10/3.11. Installs CUDA 12.8 PyTorch wheels which
-# run on CUDA 12.x and CUDA 13.x drivers via forward compatibility.
+# Tested with Python 3.10/3.11. Installs torch 2.5.1 + CUDA 12.1 wheels by
+# default, which include sm_70 kernels and therefore run on Tesla V100
+# (our shared cluster GPU). Newer torch wheels (2.8+) have dropped Volta.
 #
 # Usage:
-#   bash csd2smpl/scripts/setup_cluster.sh [venv_dir] [cuda_tag]
+#   bash csd2smpl/scripts/setup_cluster.sh [venv_dir] [cuda_tag] [torch_spec]
 #
 # Examples:
-#   bash csd2smpl/scripts/setup_cluster.sh                 # ./.venv, cu128
-#   bash csd2smpl/scripts/setup_cluster.sh ~/envs/csd cu124
+#   bash csd2smpl/scripts/setup_cluster.sh                          # V100 default
+#   bash csd2smpl/scripts/setup_cluster.sh ~/envs/csd cu124 torch==2.7.1
 #
 # After it finishes:
 #   source <venv_dir>/bin/activate
@@ -19,7 +20,8 @@
 set -euo pipefail
 
 VENV_DIR="${1:-.venv}"
-CUDA_TAG="${2:-cu128}"
+CUDA_TAG="${2:-cu121}"
+TORCH_SPEC="${3:-torch==2.5.1}"
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "error: python3 not found on PATH" >&2
@@ -60,8 +62,23 @@ fi
 python -m pip install --upgrade pip wheel
 
 echo ""
-echo "Installing PyTorch ($CUDA_TAG) ..."
-python -m pip install --index-url "https://download.pytorch.org/whl/$CUDA_TAG" torch
+echo "Installing PyTorch ($TORCH_SPEC, $CUDA_TAG) ..."
+python -m pip install --index-url "https://download.pytorch.org/whl/$CUDA_TAG" "$TORCH_SPEC"
+
+# Fail fast if the installed wheel has no kernels for this GPU.
+python - <<'PY'
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit(0)
+archs = torch.cuda.get_arch_list()
+dev_cc = torch.cuda.get_device_properties(0)
+sm = f"sm_{dev_cc.major}{dev_cc.minor}"
+if sm not in archs and not any(a.startswith(f"sm_{dev_cc.major}") for a in archs):
+    print(f"ERROR: torch {torch.__version__} built for {archs}, "
+          f"but GPU is {dev_cc.name} ({sm}). Pick an older torch_spec.",
+          file=sys.stderr)
+    sys.exit(1)
+PY
 
 echo ""
 echo "Installing csd2smpl deps ..."
