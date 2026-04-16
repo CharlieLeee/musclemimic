@@ -409,7 +409,22 @@ def synthesize_file(
     """
     layout, mode = resolve_layout(layout_name, ssm_json_path, placement)
 
-    seq = np.load(npz_path, allow_pickle=True)
+    try:
+        seq = np.load(npz_path, allow_pickle=True)
+    except (OSError, ValueError, Exception) as exc:  # noqa: BLE001
+        # A few AMASS files are corrupt upstream (bad zip headers, truncated
+        # writes). Skip rather than crash the whole synthesis run.
+        print(f"[synthesize] skip unreadable {npz_path.name}: "
+              f"{exc.__class__.__name__}: {exc}")
+        return False
+
+    # Some corrupt files parse as NPZ but are missing keys we need.
+    required = {"poses", "betas", "trans"}
+    missing = required - set(seq.files)
+    if missing:
+        print(f"[synthesize] skip {npz_path.name}: missing keys {missing}")
+        return False
+
     poses_amass = np.asarray(seq["poses"]).astype(np.float32)
     betas = np.asarray(seq["betas"]).astype(np.float32)
     trans = np.asarray(seq["trans"]).astype(np.float32)
