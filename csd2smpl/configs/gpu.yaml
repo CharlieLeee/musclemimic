@@ -1,0 +1,50 @@
+# GPU training config.
+# Tuned for ~24 GB VRAM (e.g. RTX 3090, A5000, L4). For smaller cards drop
+# batch_size to 32 or 16; for 40-80 GB cards (A100/H100) push to 256+.
+
+# ── Data ───────────────────────────────────────────────────────
+data_root:      /data/amass_markers      # output of synthesize_dataset.py
+smpl_dir:       /data/body_models/smpl   # SMPL .pkl directory (eval only)
+
+marker_layout:  cmu_41
+n_markers:      41
+
+seq_len:        128                      # longer windows: more temporal context
+stride:         64
+noise_std:      0.01
+dropout_p:      0.05
+
+# ── Model ──────────────────────────────────────────────────────
+n_smpl_joints:  24
+n_betas:        10
+
+d_model:        512
+n_heads:        8
+n_layers:       6                        # deeper than CPU default
+dropout:        0.1
+max_seq_len:    4096
+
+# ── Training ───────────────────────────────────────────────────
+device:         cuda
+amp:            true                     # bf16/fp16 mixed precision
+amp_dtype:      bfloat16                 # bfloat16 (Ampere+) | float16
+grad_clip:      1.0
+batch_size:     128
+epochs:         100
+lr:             3.0e-4
+weight_decay:   1.0e-4
+warmup_steps:   1000
+ckpt_dir:       checkpoints/gpu/
+
+num_workers:        8
+num_workers_val:    4
+
+# Logging
+log_every:      50                       # steps
+val_every:      1                        # epochs
+
+# ── Loss weights ───────────────────────────────────────────────
+w_pose:         5.0
+w_shape:        0.1
+w_trans:        1.0
+w_smooth:       0.1

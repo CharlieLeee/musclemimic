@@ -19,6 +19,12 @@ multirun/
 home/
 loco_mujoco/smpl/conf_paths.yaml
 data/
+# csd2smpl ships its own data package (loaders, layouts, synth). Keep code,
+# but its data/raw/ has its own .gitignore that excludes downloaded archives,
+# and we still want pycache out (the negation above would otherwise re-include it).
+!csd2smpl/data/
+!csd2smpl/data/**
+csd2smpl/data/**/__pycache__/
 *.vscode
 loco_mujoco/**.yaml
 **/video2images.sh

@@ -1,0 +1,39 @@
+# Full-size training config (CPU-friendly defaults; bump for GPU run).
+
+# ── Data ───────────────────────────────────────────────────────
+data_root:      /data/amass_markers   # output of synthesize_dataset.py
+smpl_dir:       body_models/smpl      # SMPL .pkl directory (eval only)
+
+marker_layout:  cmu_41
+n_markers:      41
+
+seq_len:        64
+stride:         32
+noise_std:      0.01                  # m, Gaussian per-marker noise
+dropout_p:      0.05                  # per-frame per-marker dropout
+
+# ── Model ──────────────────────────────────────────────────────
+n_smpl_joints:  24
+n_betas:        10
+
+d_model:        512
+n_heads:        8
+n_layers:       4
+dropout:        0.1
+max_seq_len:    4096
+
+# ── Training ───────────────────────────────────────────────────
+batch_size:     64
+epochs:         100
+lr:             3.0e-4
+weight_decay:   1.0e-4
+ckpt_dir:       checkpoints/
+
+num_workers:        4
+num_workers_val:    2
+
+# ── Loss weights ───────────────────────────────────────────────
+w_pose:         5.0
+w_shape:        0.1
+w_trans:        1.0
+w_smooth:       0.1

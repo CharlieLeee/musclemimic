@@ -1,0 +1,17 @@
+# csd2smpl dependencies.
+#
+# Torch is intentionally NOT pinned here — install it separately with the
+# correct CUDA wheel for your driver. See csd2smpl/scripts/setup_cluster.sh.
+#
+# Quick reference:
+#   CPU-only:  pip install --index-url https://download.pytorch.org/whl/cpu  torch
+#   CUDA 12.8: pip install --index-url https://download.pytorch.org/whl/cu128 torch
+#              (cu128 wheels run on CUDA 13 drivers via forward compatibility)
+
+numpy>=1.26
+roma>=1.5
+pyyaml>=6.0
+
+# Stage-1 (synthesize) and Stage-3 (evaluate) require smplx + an SMPL .pkl
+# body model from https://smpl.is.tue.mpg.de/. Comment out for arch-only smoke.
+smplx>=0.1.28

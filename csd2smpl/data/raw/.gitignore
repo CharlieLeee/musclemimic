@@ -1,0 +1,3 @@
+# Never commit raw downloaded archives or NPZs to the repo.
+*
+!.gitignore

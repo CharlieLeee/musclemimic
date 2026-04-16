@@ -1,0 +1,65 @@
+# V100 (32 GB) 3-way shared config.
+#
+# Per-instance constraints:
+#   - 10 GB VRAM (enforced via torch.cuda.set_per_process_memory_fraction)
+#   - 16 GB RAM  (dataset RAM-cache disabled, low num_workers)
+#   - Fair time-slicing on the GPU compute (no enforcement; throughput
+#     varies with co-tenants — measured via nvidia-smi % util globally).
+#
+# Storage under /home only:
+#   data_root, smpl_dir, ckpt_dir, log_dir all resolve via $HOME at launch
+#   in scripts/run_pipeline.sh. The placeholder strings here are templates;
+#   the launcher overrides them with absolute /home paths via env vars.
+
+# ── Data (paths set by the pipeline launcher) ──────────────────
+data_root:      ${HOME}/csd2smpl/markers
+smpl_dir:       ${HOME}/csd2smpl/body_models/smpl
+
+marker_layout:  cmu_41
+n_markers:      41
+
+seq_len:        128
+stride:         64
+noise_std:      0.01
+dropout_p:      0.05
+
+# ── Model ──────────────────────────────────────────────────────
+n_smpl_joints:  24
+n_betas:        10
+
+d_model:        512
+n_heads:        8
+n_layers:       4
+dropout:        0.1
+max_seq_len:    4096
+
+# ── Training ───────────────────────────────────────────────────
+device:         cuda
+amp:            true
+amp_dtype:      float16        # V100 (sm_70) lacks bf16 hardware
+grad_clip:      1.0
+
+# 3-way V100 share: 10 GB / 32 GB ≈ 0.31 hard cap
+vram_fraction:  0.31
+
+batch_size:     64             # keeps activations + attention well under 10 GB
+epochs:         100
+lr:             3.0e-4
+weight_decay:   1.0e-4
+warmup_steps:   1000
+ckpt_dir:       ${HOME}/csd2smpl/checkpoints
+
+# RAM-conscious data loading (16 GB cap; 3 workers max + no cache).
+num_workers:        2
+num_workers_val:    1
+cache_in_ram:       false       # honoured by MarkerDataset
+
+# Logging
+log_every:      50
+val_every:      1
+
+# ── Loss weights ───────────────────────────────────────────────
+w_pose:         5.0
+w_shape:        0.1
+w_trans:        1.0
+w_smooth:       0.1

@@ -1,0 +1,28 @@
+# Tiny config used by the smoke tests — NOT for real training.
+# Goal: verify forward/backward/loss-decrease on CPU in seconds.
+
+# Input contract
+n_markers:      41          # must match the synthesized layout (cmu_41)
+marker_layout:  cmu_41
+
+# SMPL output
+n_smpl_joints:  24
+n_betas:        10
+
+# Model
+d_model:        64
+n_heads:        4
+n_layers:       2
+dropout:        0.0
+max_seq_len:    128
+
+# Training
+seq_len:        16
+batch_size:     4
+lr:             3.0e-3
+
+# Loss weights
+w_pose:         5.0
+w_shape:        0.1
+w_trans:        1.0
+w_smooth:       0.1
