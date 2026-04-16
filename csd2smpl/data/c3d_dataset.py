@@ -24,18 +24,32 @@ import torch
 from torch.utils.data import Dataset
 
 
-# Standard AMASS train/val/test sub-dataset split (Mahmood et al. 2019).
+# AMASS paper-canonical train/val/test sub-dataset split.
+# Source: nghorbani/amass notebooks/02-AMASS_DNN.ipynb (commented canonical
+# block; the notebook's active cell is a tiny debug subset).
+#
 # Paths under ``data_root`` are expected to start with the sub-dataset name,
 # e.g. ``<root>/CMU/01/01_01.markers.npz``.
+#
+# The original paper's "BML" bucket predates the modern sub-dataset splits
+# (BioMotionLab_NTroje, BMLhandball, BMLmovi were shipped separately later);
+# we expand it below so all BML-origin data lives in train.
+# DFaust_67 was released after the paper and is placed in train by convention.
 AMASS_SPLITS: dict[str, list[str]] = {
     "train": [
-        "ACCAD", "BMLhandball", "BMLmovi", "BioMotionLab_NTroje",
-        "CMU", "DFaust_67", "EKUT", "Eyes_Japan_Dataset",
-        "KIT", "MPI_Limits", "SSM_synced", "TCD_handMocap",
-        "TotalCapture", "Transitions_mocap",
+        "ACCAD",
+        "BioMotionLab_NTroje", "BMLhandball", "BMLmovi",  # BML expanded
+        "CMU",
+        "DFaust_67",                                       # post-paper, train by convention
+        "EKUT",
+        "Eyes_Japan_Dataset",
+        "KIT",
+        "MPI_Limits",
+        "TCD_handMocap",
+        "TotalCapture",
     ],
-    "val": ["MPI_HDM05", "HumanEva"],
-    "test": ["SFU", "MPI_mosh"],
+    "val": ["HumanEva", "MPI_HDM05", "SFU", "MPI_mosh"],
+    "test": ["Transitions_mocap", "SSM_synced"],
 }
 
 

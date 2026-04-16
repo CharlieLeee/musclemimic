@@ -40,6 +40,8 @@ from csd2smpl.data.marker_layouts import (
     MarkerSpec,
     get_layout,
     layout_to_arrays,
+    layout_vertex_ids,
+    load_cmu41_with_vertex_ids,
 )
 
 
@@ -76,7 +78,7 @@ def downsample(arr: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
     return arr[::step]
 
 
-def smpl_forward_joints(
+def smpl_forward(
     poses_smpl72: np.ndarray,
     betas10: np.ndarray,
     trans: np.ndarray,
@@ -84,8 +86,9 @@ def smpl_forward_joints(
     gender: str = "neutral",
     batch_size: int = 256,
     device: str = "cpu",
-) -> np.ndarray:
-    """Run SMPL forward kinematics and return the 24 SMPL joint world positions.
+    return_vertices: bool = False,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Run SMPL forward kinematics; return joints and optionally vertices.
 
     Parameters
     ----------
@@ -103,11 +106,15 @@ def smpl_forward_joints(
         Frames per smplx forward call.
     device : str
         'cpu' or 'cuda'.
+    return_vertices : bool
+        If ``True``, also return the 6890-vertex mesh per frame.
 
     Returns
     -------
-    np.ndarray
+    joints : np.ndarray
         Shape ``(T, 24, 3)``, metres.
+    vertices : np.ndarray or None
+        Shape ``(T, 6890, 3)`` if ``return_vertices``, else ``None``.
     """
     import smplx  # imported lazily so the package is inspectable without it
 
@@ -120,7 +127,8 @@ def smpl_forward_joints(
     ).to(device)
 
     t = poses_smpl72.shape[0]
-    chunks: list[np.ndarray] = []
+    j_chunks: list[np.ndarray] = []
+    v_chunks: list[np.ndarray] | None = [] if return_vertices else None
     for start in range(0, t, batch_size):
         end = min(start + batch_size, t)
         b = end - start
@@ -137,8 +145,31 @@ def smpl_forward_joints(
                 betas=betas_batch,
                 transl=trans_batch,
             )
-        chunks.append(out.joints[:, :24].cpu().numpy())
-    return np.concatenate(chunks, axis=0)
+        j_chunks.append(out.joints[:, :24].cpu().numpy())
+        if v_chunks is not None:
+            v_chunks.append(out.vertices.cpu().numpy())
+
+    joints = np.concatenate(j_chunks, axis=0)
+    vertices = np.concatenate(v_chunks, axis=0) if v_chunks is not None else None
+    return joints, vertices
+
+
+def smpl_forward_joints(
+    poses_smpl72: np.ndarray,
+    betas10: np.ndarray,
+    trans: np.ndarray,
+    model_path: str,
+    gender: str = "neutral",
+    batch_size: int = 256,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Back-compat shim that returns just joints. Prefer :func:`smpl_forward`."""
+    joints, _ = smpl_forward(
+        poses_smpl72=poses_smpl72, betas10=betas10, trans=trans,
+        model_path=model_path, gender=gender,
+        batch_size=batch_size, device=device, return_vertices=False,
+    )
+    return joints
 
 
 def joints_to_markers(
@@ -147,17 +178,16 @@ def joints_to_markers(
 ) -> np.ndarray:
     """Place virtual markers at ``joints[anchor] + offset`` per :class:`MarkerSpec`.
 
-    World-frame offset only — the v1 approximation. Real markers attach to a
-    fixed point on the skin (i.e. a SMPL mesh vertex) and rotate with the
-    parent bone; that path is deferred until vertex IDs are populated in
-    :mod:`csd2smpl.data.marker_layouts`.
+    World-frame offset only — the v1 approximation. Use
+    :func:`vertices_to_markers` when ``layout`` has vertex IDs populated
+    (i.e. after ``fetch_external.sh`` + :func:`load_cmu41_with_vertex_ids`).
 
     Parameters
     ----------
     joints : np.ndarray
-        Shape ``(T, 24, 3)``, SMPL joint world positions.
+        Shape ``(T, 24, 3)``.
     layout : tuple of MarkerSpec
-        Marker layout to materialise.
+        Marker layout.
 
     Returns
     -------
@@ -168,6 +198,52 @@ def joints_to_markers(
         raise ValueError(f"expected joints shape (T, J, 3); got {joints.shape}")
     anchors, offsets, _ = layout_to_arrays(layout)
     return (joints[:, anchors, :] + offsets[None, :, :]).astype(np.float32)
+
+
+def vertices_to_markers(
+    vertices: np.ndarray,
+    joints: np.ndarray,
+    layout: tuple[MarkerSpec, ...],
+) -> np.ndarray:
+    """Place markers at SMPL mesh vertex IDs; fall back to joint+offset when None.
+
+    The SSM mapping doesn't cover every CMU label (e.g. RUPA ≠ RUPA2 is a
+    close alias; some markers have no SSM equivalent). Markers whose
+    ``vertex_id`` is ``None`` use the joint-anchored fallback so every
+    position in the returned ``(T, M, 3)`` tensor is defined.
+
+    Parameters
+    ----------
+    vertices : np.ndarray
+        Shape ``(T, 6890, 3)`` — SMPL mesh vertex positions per frame.
+    joints : np.ndarray
+        Shape ``(T, 24, 3)`` — used only for markers lacking a vertex ID.
+    layout : tuple of MarkerSpec
+        Marker layout; entries with populated ``vertex_id`` use the mesh,
+        others fall back to joint-anchored offsets.
+
+    Returns
+    -------
+    np.ndarray
+        Shape ``(T, M, 3)``, dtype float32.
+    """
+    if vertices.ndim != 3 or vertices.shape[-1] != 3:
+        raise ValueError(f"expected vertices shape (T, V, 3); got {vertices.shape}")
+    if vertices.shape[0] != joints.shape[0]:
+        raise ValueError(
+            f"frame count mismatch: vertices T={vertices.shape[0]} "
+            f"vs joints T={joints.shape[0]}"
+        )
+    t = vertices.shape[0]
+    m = len(layout)
+    out = np.empty((t, m, 3), dtype=np.float32)
+    for i, spec in enumerate(layout):
+        if spec.vertex_id is not None:
+            out[:, i, :] = vertices[:, spec.vertex_id, :]
+        else:
+            offset = np.asarray(spec.offset, dtype=np.float32)
+            out[:, i, :] = joints[:, spec.anchor_joint, :] + offset
+    return out
 
 
 def add_noise(
@@ -204,6 +280,58 @@ def add_noise(
     return noisy.astype(np.float32), mask.astype(bool)
 
 
+def resolve_layout(
+    layout_name: str,
+    ssm_json_path: str | Path | None,
+    placement: str,
+) -> tuple[tuple[MarkerSpec, ...], str]:
+    """Build the final layout + placement mode to use for synthesis.
+
+    Parameters
+    ----------
+    layout_name : str
+        Registered layout key (e.g. ``"cmu_41"``).
+    ssm_json_path : str or Path or None
+        Path to the SSM vertex-ID JSON. Required when ``placement="vertex"``.
+        If ``placement="auto"`` and this is not None + exists, vertex mode
+        is used; otherwise joint-anchored.
+    placement : str
+        ``"vertex"`` (error if JSON missing), ``"joint_offset"`` (never use
+        vertex IDs), or ``"auto"`` (vertex if JSON present, else joint).
+
+    Returns
+    -------
+    layout : tuple of MarkerSpec
+        The resolved layout (vertex IDs populated iff vertex mode selected).
+    mode : str
+        ``"vertex"`` or ``"joint_offset"``.
+    """
+    if placement not in {"vertex", "joint_offset", "auto"}:
+        raise ValueError(
+            f"placement must be 'vertex'|'joint_offset'|'auto'; got {placement!r}"
+        )
+    base = get_layout(layout_name)
+    ssm_present = ssm_json_path is not None and Path(ssm_json_path).exists()
+
+    if placement == "joint_offset":
+        return base, "joint_offset"
+    if placement == "vertex":
+        if not ssm_present:
+            raise FileNotFoundError(
+                f"placement=vertex but SSM JSON not at {ssm_json_path}. "
+                f"Run: bash csd2smpl/scripts/fetch_external.sh"
+            )
+        if layout_name != "cmu_41":
+            raise NotImplementedError(
+                f"vertex-mode is only wired for cmu_41; got layout {layout_name!r}"
+            )
+        return load_cmu41_with_vertex_ids(ssm_json_path), "vertex"
+    # auto
+    if ssm_present and layout_name == "cmu_41":
+        return load_cmu41_with_vertex_ids(ssm_json_path), "vertex"
+    return base, "joint_offset"
+
+
 def synthesize_file(
     npz_path: Path,
     out_path: Path,
@@ -214,7 +342,9 @@ def synthesize_file(
     target_fps: float = 30.0,
     device: str = "cpu",
     min_frames: int = 8,
-    forward_fn: Callable[..., np.ndarray] | None = None,
+    placement: str = "auto",
+    ssm_json_path: str | Path | None = None,
+    forward_fn: Callable[..., tuple[np.ndarray, np.ndarray | None]] | None = None,
 ) -> bool:
     """Convert one AMASS NPZ to a markers+SMPL-targets NPZ.
 
@@ -227,7 +357,7 @@ def synthesize_file(
     model_path : str
         SMPL body-model directory passed to smplx.
     layout_name : str
-        Key into :data:`csd2smpl.data.marker_layouts.LAYOUTS`. Default ``"cmu_41"``.
+        Key into :data:`csd2smpl.data.marker_layouts.LAYOUTS`.
     noise_std, dropout_p : float
         Forwarded to :func:`add_noise`.
     target_fps : float
@@ -236,16 +366,22 @@ def synthesize_file(
         Torch device for the smplx forward pass.
     min_frames : int
         Sequences shorter than this (after downsampling) are skipped.
+    placement : str
+        ``"vertex"`` | ``"joint_offset"`` | ``"auto"``. See
+        :func:`resolve_layout`.
+    ssm_json_path : str or Path or None
+        Path to SSM vertex-ID JSON (required for ``placement='vertex'``).
     forward_fn : callable, optional
-        Override for the joint forward-kinematics function. Defaults to
-        :func:`smpl_forward_joints`. Tests inject a stub to bypass smplx.
+        Override for the SMPL forward. Signature must match
+        :func:`smpl_forward`: returns ``(joints, vertices_or_None)``. Tests
+        inject a stub to bypass smplx.
 
     Returns
     -------
     bool
         ``True`` if the file was written, ``False`` if skipped.
     """
-    layout = get_layout(layout_name)
+    layout, mode = resolve_layout(layout_name, ssm_json_path, placement)
 
     seq = np.load(npz_path, allow_pickle=True)
     poses_amass = np.asarray(seq["poses"]).astype(np.float32)
@@ -263,17 +399,25 @@ def synthesize_file(
     if poses_smpl72.shape[0] < min_frames:
         return False
 
-    fwd = forward_fn or smpl_forward_joints
-    joints = fwd(
+    need_vertices = (mode == "vertex")
+    fwd = forward_fn or smpl_forward
+    joints, vertices = fwd(
         poses_smpl72=poses_smpl72,
         betas10=betas[:10],
         trans=trans,
         model_path=model_path,
         gender=gender,
         device=device,
+        return_vertices=need_vertices,
     )
 
-    markers_clean = joints_to_markers(joints, layout)
+    if mode == "vertex":
+        if vertices is None:
+            raise RuntimeError("forward_fn did not return vertices despite return_vertices=True")
+        markers_clean = vertices_to_markers(vertices, joints, layout)
+    else:
+        markers_clean = joints_to_markers(joints, layout)
+
     markers_noisy, mask = add_noise(
         markers_clean, noise_std=noise_std, dropout_p=dropout_p
     )
@@ -289,6 +433,7 @@ def synthesize_file(
         betas=betas[:10].astype(np.float32),    # (10,)
         trans=trans.astype(np.float32),         # (T, 3)
         layout=str(layout_name),
+        placement=str(mode),
         marker_names=",".join(names),
         gender=str(gender),
         fps=np.float32(target_fps if target_fps > 0 else src_fps),

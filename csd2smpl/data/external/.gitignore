@@ -1,0 +1,6 @@
+# External assets are fetched at setup time (see scripts/fetch_external.sh),
+# not vendored — the source data is MPG-licensed and redistribution requires
+# written permission. Keep this dir in git as a placeholder.
+*
+!.gitignore
+!README.md

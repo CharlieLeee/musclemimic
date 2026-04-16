@@ -6,29 +6,25 @@ AMP, MoCapAct). Marker label conventions follow the CMU MoCap database.
 
 Marker → SMPL attachment
 ------------------------
-There are two ways to attach a marker to a SMPL body:
+Two paths:
 
-1. **Vertex index** — pick a specific vertex of the 6890-vertex SMPL mesh.
-   Most accurate; this is what AMASS / MoSh++ / SOMA do internally. Vertex
-   indices for common markersets are published in the SOMA and MoCapAct
-   repos. **TODO: populate `vertex_id` fields below from those sources for
-   real-data training; the current code path uses the joint-anchored
-   approximation instead.**
+1. **Vertex index (v2, preferred for real training)** — each marker is
+   placed at a specific vertex of the 6890-vertex SMPL mesh. Loaded from
+   the SSM mapping published by the AMASS authors (``nghorbani/amass``).
+   Fetched at setup time via ``scripts/fetch_external.sh`` — see
+   :func:`load_cmu41_with_vertex_ids`.
 
-2. **Joint anchor + offset** *(used by this v1 scaffold)* — each marker is
-   placed at ``smpl_joints[anchor_joint] + offset`` in the world frame.
-   Loses the per-joint rotational signal but is enough to drive the
-   architecture end-to-end without requiring the SMPL .pkl body model
-   for offset calibration. Offsets are anatomically rough (cm-scale).
-
-Either path produces a ``(T, M, 3)`` array of synthetic marker positions
-that the encoder consumes; switching paths is a one-line change in
-:func:`csd2smpl.data.synthesize.joints_to_markers`.
+2. **Joint anchor + offset (v1 fallback)** — each marker is placed at
+   ``smpl_joints[anchor_joint] + offset`` in the world frame. Loses the
+   per-joint rotational signal but needs no SMPL mesh or external assets.
+   Used by unit-test stubs and as a fallback when the SSM JSON is absent.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import numpy as np
 
@@ -153,3 +149,128 @@ def layout_to_arrays(
     offsets = np.array([s.offset for s in layout], dtype=np.float32)
     names = [s.name for s in layout]
     return anchors, offsets, names
+
+
+def layout_vertex_ids(layout: tuple[MarkerSpec, ...]) -> np.ndarray:
+    """Return per-marker SMPL vertex indices as ``(M,)`` int64.
+
+    Raises ``ValueError`` if any marker still has ``vertex_id=None``.
+    """
+    missing = [s.name for s in layout if s.vertex_id is None]
+    if missing:
+        raise ValueError(
+            f"layout has unpopulated vertex_ids for: {missing}. "
+            f"Run scripts/fetch_external.sh and use load_cmu41_with_vertex_ids."
+        )
+    return np.array([s.vertex_id for s in layout], dtype=np.int64)
+
+
+# ── SSM (nghorbani/amass) → CMU name alias table ─────────────────────────
+#
+# The SSM JSON from AMASS uses slightly different marker labels than the
+# CMU convention we use in :data:`CMU_41`. This table resolves CMU labels
+# to their SSM equivalents. ``None`` means "no direct SSM equivalent — fall
+# back to the joint-anchored offset for this marker". Wrist medial/lateral
+# conventions: CMU's ``A`` = lateral (outer/radial), ``B`` = medial (inner/
+# ulnar); SSM uses ``O/I`` (outer/inner).
+
+CMU_TO_SSM_LABEL: dict[str, str] = {
+    # Direct hits (CMU label == SSM label)
+    "LFHD": "LFHD", "RFHD": "RFHD", "LBHD": "LBHD", "RBHD": "RBHD",
+    "C7":   "C7",   "CLAV": "CLAV", "STRN": "STRN", "RBAK": "RBAK",
+    "LSHO": "LSHO", "RSHO": "RSHO",
+    "LUPA": "LUPA",  # RUPA → RUPA2 below
+    "LELB": "LELB", "RELB": "RELB",
+    "LFRM": "LFRM", "RFRM": "RFRM",
+    "LFIN": "LFIN", "RFIN": "RFIN",
+    "LASI": "LASI", "RASI": "RASI", "LPSI": "LPSI", "RPSI": "RPSI",
+    "RTHI": "RTHI",
+    "LKNE": "LKNE", "RKNE": "RKNE",
+    "LSHN": "LSHN", "RSHN": "RSHN",
+    "LANK": "LANK", "RANK": "RANK",
+    "LHEE": "LHEE", "RHEE": "RHEE",
+    "LTOE": "LTOE", "RTOE": "RTOE",
+    "LMT1": "LMT1", "RMT1": "RMT1",
+
+    # Aliases (CMU label ≠ SSM label)
+    "T10":  "T8",      # adjacent thoracic vertebra
+    "RUPA": "RUPA2",   # SSM uses RUPA2 for the right upper arm
+    "LTHI": "LTHILO",  # SSM splits thigh into upper/lower; pick lower
+    "LWRA": "LOWR",    # A = outer/radial
+    "LWRB": "LIWR",    # B = inner/ulnar
+    "RWRA": "ROWR",
+    "RWRB": "RIWR",
+}
+
+
+def load_ssm_placements(path: str | Path) -> dict[str, dict[str, int]]:
+    """Load the SSM marker→vertex JSON produced by nghorbani/amass.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to ``ssm_all_marker_placements.json``.
+
+    Returns
+    -------
+    dict[str, dict[str, int]]
+        Outer key = trial name, inner = marker label → SMPL vertex index.
+    """
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or not data:
+        raise ValueError(f"{path} has unexpected structure (empty or non-dict)")
+    for trial, markers in data.items():
+        if not isinstance(markers, dict) or not markers:
+            raise ValueError(f"trial {trial!r} has no marker entries")
+    return data
+
+
+def load_cmu41_with_vertex_ids(
+    ssm_json_path: str | Path,
+    trial: str | None = None,
+) -> tuple[MarkerSpec, ...]:
+    """Return a CMU 41 layout with ``vertex_id`` populated from the SSM JSON.
+
+    Parameters
+    ----------
+    ssm_json_path : str or Path
+        Path to ``ssm_all_marker_placements.json`` (fetched by
+        ``scripts/fetch_external.sh``).
+    trial : str or None
+        SSM trial name to use as the canonical placement. ``None`` selects
+        the first key in the JSON (deterministic: JSON is stored ordered).
+
+    Returns
+    -------
+    tuple of MarkerSpec
+        CMU 41 with ``vertex_id`` filled in for every marker whose CMU
+        label has an SSM alias. Markers without an alias retain
+        ``vertex_id=None`` and will fall back to joint-anchored placement.
+    """
+    placements = load_ssm_placements(ssm_json_path)
+    if trial is None:
+        trial = next(iter(placements))
+    if trial not in placements:
+        raise KeyError(
+            f"trial {trial!r} not in SSM placements; available: "
+            f"{list(placements)[:5]}..."
+        )
+    ssm = placements[trial]
+
+    out: list[MarkerSpec] = []
+    unresolved: list[str] = []
+    for spec in CMU_41:
+        ssm_label = CMU_TO_SSM_LABEL.get(spec.name)
+        vid = ssm.get(ssm_label) if ssm_label else None
+        if vid is None:
+            unresolved.append(spec.name)
+        out.append(replace(spec, vertex_id=vid))
+    if unresolved:
+        # Not fatal: those markers fall back to joint-anchored offsets.
+        # Print so the user knows something's not canonical.
+        print(
+            f"[marker_layouts] {len(unresolved)}/{len(CMU_41)} markers have no "
+            f"SSM vertex alias; falling back to joint-anchored: {unresolved}"
+        )
+    return tuple(out)

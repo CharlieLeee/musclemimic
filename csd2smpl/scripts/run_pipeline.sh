@@ -62,7 +62,7 @@ if [[ -f "$VENV/bin/activate" ]]; then
 fi
 
 # ── CLI parsing ───────────────────────────────────────────────
-ALL_STEPS=(inspect extract preflight synthesize train predict)
+ALL_STEPS=(inspect extract fetch_external preflight synthesize train predict)
 FROM_STEP=""
 ONLY_STEP=""
 
@@ -166,6 +166,18 @@ if should_run extract; then
     fi
 fi
 
+# ── Step: fetch_external ──────────────────────────────────────
+# Pulls the SSM marker→vertex JSON from its authoritative source
+# (not redistributed in this repo due to MPG license).
+SSM_JSON="$REPO_ROOT/csd2smpl/data/external/ssm_all_marker_placements.json"
+if should_run fetch_external; then
+    if [[ -s "$SSM_JSON" ]]; then
+        echo "[fetch_external] $SSM_JSON already present (skip)"
+    else
+        run_log fetch_external bash csd2smpl/scripts/fetch_external.sh
+    fi
+fi
+
 # ── Step: preflight ───────────────────────────────────────────
 if should_run preflight; then
     run_log preflight python -m csd2smpl.scripts.preflight \
@@ -185,6 +197,8 @@ if should_run synthesize; then
             --out_root   "$MARKERS_DIR" \
             --model_path "$SMPL_DIR" \
             --layout     cmu_41 \
+            --placement  auto \
+            --ssm_json   "$SSM_JSON" \
             --target_fps 30
     fi
 fi
