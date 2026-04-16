@@ -5,18 +5,25 @@ from collections.abc import Sequence
 
 import mujoco
 import numpy as np
+import trimesh.creation
 import viser
 
 from musclemimic.viewer.viser_utils import build_body_meshes
 
 
 class TrajectoryViserViewer:
-    def __init__(self, env, include_collision: bool = False) -> None:
+    _TENDON_RADIUS_SCALE = 0.35
+    _TENDON_OPACITY_SCALE = 0.7
+
+    def __init__(self, env, include_collision: bool = False, target_fps: float = 60.0) -> None:
         if getattr(env, "th", None) is None:
             raise ValueError("TrajectoryViserViewer requires an environment with env.th loaded.")
+        if target_fps <= 0:
+            raise ValueError(f"target_fps must be > 0, got {target_fps}.")
 
         self.env = env
         self.include_collision = include_collision
+        self.target_fps = float(target_fps)
 
         self._server = None
         self._model = None
@@ -26,6 +33,9 @@ class TrajectoryViserViewer:
         self._tendon_scene = None
         self._tendon_option = None
         self._tendon_camera = None
+        self._tendon_capacity = 0
+        self._tendon_vertices = None
+        self._tendon_faces = None
 
         self._motion_labels: list[str] = []
         self._current_traj = 0
@@ -34,6 +44,7 @@ class TrajectoryViserViewer:
         self._loop = True
         self._time_multiplier = 1.0
         self._programmatic_update = False
+        self._playback_remainder = 0.0
 
         self._pause_button = None
         self._traj_dropdown = None
@@ -75,15 +86,12 @@ class TrajectoryViserViewer:
             self._tendon_option = mujoco.MjvOption()
             self._tendon_option.flags[mujoco.mjtVisFlag.mjVIS_TENDON] = 1
             self._tendon_camera = mujoco.MjvCamera()
-            points, colors = self._build_tendon_segments(model, data)
-            if points.size > 0:
-                self._tendon_handle = self._server.scene.add_line_segments(
-                    "/tendons",
-                    points=points,
-                    colors=colors,
-                    line_width=3,
-                    visible=True,
-                )
+            unit_cylinder = trimesh.creation.cylinder(radius=1.0, height=2.0, sections=10)
+            self._tendon_vertices = np.asarray(unit_cylinder.vertices, dtype=np.float32)
+            self._tendon_faces = np.asarray(unit_cylinder.faces, dtype=np.uint32)
+            positions, wxyzs, scales, colors, opacities = self._extract_tendon_mesh_instances(model, data)
+            if positions.size > 0:
+                self._create_tendon_handle(positions, wxyzs, scales, colors, opacities)
 
     def _setup_gui(self, motion_labels: Sequence[str]) -> None:
         self._motion_labels = list(motion_labels)
@@ -99,6 +107,7 @@ class TrajectoryViserViewer:
                 @self._pause_button.on_click
                 def _(_event) -> None:
                     self._paused = not self._paused
+                    self._playback_remainder = 0.0
                     self._pause_button.label = "Play" if self._paused else "Pause"
                     self._pause_button.icon = (
                         viser.Icon.PLAYER_PLAY if self._paused else viser.Icon.PLAYER_PAUSE
@@ -119,6 +128,7 @@ class TrajectoryViserViewer:
 
                 @restart_button.on_click
                 def _(_event) -> None:
+                    self._playback_remainder = 0.0
                     self._render_frame(self._current_traj, 0)
 
             with self._server.gui.add_folder("Trajectory"):
@@ -133,6 +143,7 @@ class TrajectoryViserViewer:
                     if self._programmatic_update:
                         return
                     new_traj = self._motion_labels.index(event.target.value)
+                    self._playback_remainder = 0.0
                     self._render_frame(new_traj, 0)
 
                 self._frame_slider = self._server.gui.add_slider(
@@ -147,6 +158,7 @@ class TrajectoryViserViewer:
                 def _(event) -> None:
                     if self._programmatic_update:
                         return
+                    self._playback_remainder = 0.0
                     self._render_frame(self._current_traj, int(event.target.value))
 
                 self._loop_checkbox = self._server.gui.add_checkbox("Loop", initial_value=self._loop)
@@ -186,9 +198,7 @@ class TrajectoryViserViewer:
                 handle.batched_positions = np.array([body_xpos[body_id]], dtype=float)
                 handle.batched_wxyzs = np.array([body_xquat[body_id]], dtype=float)
             if self._tendon_handle is not None:
-                points, colors = self._build_tendon_segments(self._model, self._data)
-                self._tendon_handle.points = points
-                self._tendon_handle.colors = colors
+                self._update_tendon_handle(self._model, self._data)
         self._server.flush()
 
         self._current_traj = traj_idx
@@ -225,26 +235,37 @@ class TrajectoryViserViewer:
         self._setup_gui(motion_labels)
         self._render_frame(0, 0)
 
+        target_dt = 1.0 / self.target_fps
+        last_tick = time.perf_counter()
+
         try:
             while True:
-                start = time.time()
+                start = time.perf_counter()
+                wall_dt = start - last_tick
+                last_tick = start
                 if not self._paused:
-                    next_frame = self._current_frame + 1
-                    traj_len = self.env.th.len_trajectory(self._current_traj)
-                    if next_frame >= traj_len:
-                        if self._loop:
-                            next_frame = 0
-                        else:
-                            self._paused = True
-                            self._pause_button.label = "Play"
-                            self._pause_button.icon = viser.Icon.PLAYER_PLAY
-                            self._update_status()
-                            next_frame = self._current_frame
-                    if next_frame != self._current_frame or (self._current_frame == 0 and traj_len == 1):
-                        self._render_frame(self._current_traj, next_frame)
+                    self._playback_remainder += wall_dt * self._time_multiplier
+                    frames_to_advance = int(self._playback_remainder / self.env.th.traj_dt)
 
-                elapsed = time.time() - start
-                sleep_time = max(0.0, (self.env.th.traj_dt / self._time_multiplier) - elapsed)
+                    if frames_to_advance > 0:
+                        self._playback_remainder -= frames_to_advance * self.env.th.traj_dt
+                        traj_len = self.env.th.len_trajectory(self._current_traj)
+                        next_frame = self._current_frame + frames_to_advance
+                        if next_frame >= traj_len:
+                            if self._loop:
+                                next_frame %= traj_len
+                            else:
+                                next_frame = traj_len - 1
+                                self._paused = True
+                                self._playback_remainder = 0.0
+                                self._pause_button.label = "Play"
+                                self._pause_button.icon = viser.Icon.PLAYER_PLAY
+                                self._update_status()
+                        if next_frame != self._current_frame:
+                            self._render_frame(self._current_traj, next_frame)
+
+                elapsed = time.perf_counter() - start
+                sleep_time = max(0.0, target_dt - elapsed)
                 if sleep_time > 0:
                     time.sleep(sleep_time)
         except KeyboardInterrupt:
@@ -253,11 +274,12 @@ class TrajectoryViserViewer:
             if self._server is not None:
                 self._server.stop()
 
-    def _build_tendon_segments(
+    def _extract_tendon_mesh_instances(
         self, model: mujoco.MjModel, data: mujoco.MjData
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if self._tendon_scene is None or self._tendon_option is None or self._tendon_camera is None:
-            return np.zeros((0, 2, 3), dtype=np.float32), np.zeros((0, 2, 3), dtype=np.uint8)
+            empty_vec3 = np.zeros((0, 3), dtype=np.float32)
+            return empty_vec3, np.zeros((0, 4), dtype=np.float32), empty_vec3, np.zeros((0, 3), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
 
         mujoco.mjv_updateScene(
             model,
@@ -271,31 +293,92 @@ class TrajectoryViserViewer:
 
         ngeom = self._tendon_scene.ngeom
         if ngeom == 0:
-            return np.zeros((0, 2, 3), dtype=np.float32), np.zeros((0, 2, 3), dtype=np.uint8)
+            empty_vec3 = np.zeros((0, 3), dtype=np.float32)
+            return empty_vec3, np.zeros((0, 4), dtype=np.float32), empty_vec3, np.zeros((0, 3), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
 
         geoms = self._tendon_scene.geoms[:ngeom]
         objtype_arr = np.array([geom.objtype for geom in geoms], dtype=np.int32)
         tendon_indices = np.where(objtype_arr == mujoco.mjtObj.mjOBJ_TENDON)[0]
         if len(tendon_indices) == 0:
-            return np.zeros((0, 2, 3), dtype=np.float32), np.zeros((0, 2, 3), dtype=np.uint8)
+            empty_vec3 = np.zeros((0, 3), dtype=np.float32)
+            return empty_vec3, np.zeros((0, 4), dtype=np.float32), empty_vec3, np.zeros((0, 3), dtype=np.uint8), np.zeros((0,), dtype=np.float32)
 
-        positions = np.empty((len(tendon_indices), 3), dtype=np.float32)
-        axes = np.empty((len(tendon_indices), 3), dtype=np.float32)
-        halves = np.empty(len(tendon_indices), dtype=np.float32)
-        rgbas = np.empty((len(tendon_indices), 4), dtype=np.float32)
+        count = len(tendon_indices)
+        positions = np.empty((count, 3), dtype=np.float32)
+        wxyzs = np.empty((count, 4), dtype=np.float32)
+        scales = np.empty((count, 3), dtype=np.float32)
+        colors = np.empty((count, 3), dtype=np.uint8)
+        opacities = np.empty((count,), dtype=np.float32)
+
         for i, geom_idx in enumerate(tendon_indices):
             geom = geoms[geom_idx]
             positions[i] = geom.pos
-            axes[i] = geom.mat[:, 2]
-            halves[i] = geom.size[2]
-            rgbas[i] = geom.rgba
+            quat = np.empty(4, dtype=np.float64)
+            mujoco.mju_mat2Quat(quat, np.asarray(geom.mat, dtype=np.float64).reshape(-1))
+            wxyzs[i] = quat.astype(np.float32)
+            radius = max(1e-4, float(geom.size[0]) * self._TENDON_RADIUS_SCALE)
+            scales[i] = np.array([radius, radius, geom.size[2]], dtype=np.float32)
+            colors[i] = (np.clip(geom.rgba[:3], 0.0, 1.0) * 255.0).astype(np.uint8)
+            opacities[i] = float(np.clip(geom.rgba[3], 0.0, 1.0)) * self._TENDON_OPACITY_SCALE
 
-        offsets = axes * halves[:, None]
-        points = np.stack([positions - offsets, positions + offsets], axis=1).astype(np.float32)
-        rgb = np.clip(rgbas[:, :3], 0.0, 1.0) * 0.7 * np.clip(rgbas[:, 3:4], 0.0, 1.0)
-        colors_uint8 = (rgb * 255.0).astype(np.uint8)
-        colors = np.stack([colors_uint8, colors_uint8], axis=1)
-        return points, colors
+        return positions, wxyzs, scales, colors, opacities
+
+    def _create_tendon_handle(
+        self,
+        positions: np.ndarray,
+        wxyzs: np.ndarray,
+        scales: np.ndarray,
+        colors: np.ndarray,
+        opacities: np.ndarray,
+    ) -> None:
+        if self._tendon_handle is not None:
+            self._tendon_handle.remove()
+
+        self._tendon_capacity = positions.shape[0]
+        self._tendon_handle = self._server.scene.add_batched_meshes_simple(
+            "/tendons",
+            vertices=self._tendon_vertices,
+            faces=self._tendon_faces,
+            batched_positions=positions,
+            batched_wxyzs=wxyzs,
+            batched_scales=scales,
+            batched_colors=colors,
+            batched_opacities=opacities,
+            lod="off",
+            opacity=1.0,
+            flat_shading=True,
+            side="double",
+            cast_shadow=False,
+            receive_shadow=False,
+            visible=True,
+        )
+
+    def _update_tendon_handle(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        positions, wxyzs, scales, colors, opacities = self._extract_tendon_mesh_instances(model, data)
+        count = positions.shape[0]
+
+        if count == 0:
+            if self._tendon_handle is not None and self._tendon_capacity > 0:
+                self._tendon_handle.batched_opacities = np.zeros((self._tendon_capacity,), dtype=np.float32)
+            return
+
+        if self._tendon_handle is None or count > self._tendon_capacity:
+            self._create_tendon_handle(positions, wxyzs, scales, colors, opacities)
+            return
+
+        if count < self._tendon_capacity:
+            pad = self._tendon_capacity - count
+            positions = np.concatenate([positions, np.zeros((pad, 3), dtype=np.float32)], axis=0)
+            wxyzs = np.concatenate([wxyzs, np.tile(np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (pad, 1))], axis=0)
+            scales = np.concatenate([scales, np.zeros((pad, 3), dtype=np.float32)], axis=0)
+            colors = np.concatenate([colors, np.zeros((pad, 3), dtype=np.uint8)], axis=0)
+            opacities = np.concatenate([opacities, np.zeros((pad,), dtype=np.float32)], axis=0)
+
+        self._tendon_handle.batched_positions = positions
+        self._tendon_handle.batched_wxyzs = wxyzs
+        self._tendon_handle.batched_scales = scales
+        self._tendon_handle.batched_colors = colors
+        self._tendon_handle.batched_opacities = opacities
 
     def _update_status(self) -> None:
         if self._status_html is None:
