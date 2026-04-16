@@ -160,8 +160,30 @@ if should_run extract; then
                 break
             done
         fi
-        if [[ -z "$(find "$SMPL_DIR" -name '*.pkl' 2>/dev/null | head -1)" ]]; then
-            echo "[extract] WARNING: no .pkl found under $SMPL_DIR after extraction" >&2
+        # Post-extract normalisation: flatten + rename to smplx convention.
+        # The SMPL v1.1.0 release zip nests as
+        #   SMPL_python_v.1.1.0/smpl/models/basicmodel_{f,m,neutral}_lbs_10_207_0_v1.1.0.pkl
+        # but smplx expects SMPL_{FEMALE,MALE,NEUTRAL}.pkl at the top level.
+        mapfile -t found_pkls < <(find "$SMPL_DIR" -name '*.pkl' -type f)
+        for src in "${found_pkls[@]}"; do
+            base="$(basename "$src")"
+            case "$base" in
+                basicmodel_f_lbs*)       target="$SMPL_DIR/SMPL_FEMALE.pkl" ;;
+                basicmodel_m_lbs*)       target="$SMPL_DIR/SMPL_MALE.pkl" ;;
+                basicmodel_neutral_lbs*) target="$SMPL_DIR/SMPL_NEUTRAL.pkl" ;;
+                SMPL_FEMALE.pkl|SMPL_MALE.pkl|SMPL_NEUTRAL.pkl) continue ;;
+                *) continue ;;
+            esac
+            if [[ ! -f "$target" ]]; then
+                echo "  rename $base -> $(basename "$target")"
+                mv "$src" "$target"
+            fi
+        done
+        # Remove now-empty nested dirs left behind by the zip layout.
+        find "$SMPL_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+
+        if [[ -z "$(find "$SMPL_DIR" -maxdepth 1 -name 'SMPL_*.pkl' 2>/dev/null | head -1)" ]]; then
+            echo "[extract] WARNING: no SMPL_*.pkl at top of $SMPL_DIR after extraction" >&2
         fi
     fi
 fi

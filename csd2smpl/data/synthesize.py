@@ -78,6 +78,7 @@ def downsample(arr: np.ndarray, src_fps: float, dst_fps: float) -> np.ndarray:
     return arr[::step]
 
 
+
 def smpl_forward(
     poses_smpl72: np.ndarray,
     betas10: np.ndarray,
