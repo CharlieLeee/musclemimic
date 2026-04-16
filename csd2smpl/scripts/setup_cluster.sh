@@ -35,11 +35,28 @@ esac
 
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating venv at $VENV_DIR"
-    python3 -m venv "$VENV_DIR"
+    # Some minimal Python 3.12 images ship venv without ensurepip; fall back
+    # to --without-pip and bootstrap below.
+    python3 -m venv "$VENV_DIR" 2>/dev/null \
+        || python3 -m venv --without-pip "$VENV_DIR"
 fi
 
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
+
+# Bootstrap pip if the venv lacks it (Debian/Ubuntu minimal Python 3.12).
+if ! python -m pip --version >/dev/null 2>&1; then
+    echo "pip not present in venv — bootstrapping ..."
+    if python -m ensurepip --upgrade 2>/dev/null; then
+        echo "  bootstrapped via ensurepip"
+    else
+        echo "  ensurepip unavailable; pulling get-pip.py"
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+        python /tmp/get-pip.py
+        rm -f /tmp/get-pip.py
+    fi
+fi
+
 python -m pip install --upgrade pip wheel
 
 echo ""
