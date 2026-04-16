@@ -247,30 +247,30 @@ def check_forward_backward(
 
 
 def check_overfit(cfg: dict, device: torch.device) -> None:
-    """Run 20 AMP steps on a fixed batch; loss must drop."""
-    with _phase("7. Overfit 20 AMP steps (sanity)"):
+    """Run 20 fp32 steps on a fixed batch; loss must drop.
+
+    Deliberately fp32: this is a *model-correctness* check (is the
+    gradient flow + loss wiring sane?), not an AMP check. AMP is already
+    validated end-to-end by phase 6 (forward + scaled backward + scaler
+    step). Keeping this phase fp32 avoids confounding scaler warm-up with
+    genuine training failures on GPUs where fp16 needs several steps for
+    the scale factor to settle.
+    """
+    with _phase("7. Overfit 20 fp32 steps (sanity)"):
         torch.manual_seed(0)
         model = Markers2SMPL(cfg).to(device)
         batch = _make_batch(cfg, device)
         opt = AdamW(model.parameters(), lr=cfg["lr"])
-        use_amp = cfg.get("amp", False)
-        amp_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[
-            cfg.get("amp_dtype", "float16").lower()
-        ]
-        scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and amp_dtype == torch.float16))
         kw = _loss_kwargs(cfg)
 
         def step_loss() -> float:
             opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
-                pred = model(batch["markers"], batch["mask"])
-                losses = compute_losses(*pred, batch["poses_gt"], batch["betas_gt"],
-                                        batch["trans_gt"], **kw)
-            scaler.scale(losses["loss"]).backward()
-            scaler.unscale_(opt)
+            pred = model(batch["markers"], batch["mask"])
+            losses = compute_losses(*pred, batch["poses_gt"], batch["betas_gt"],
+                                    batch["trans_gt"], **kw)
+            losses["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.get("grad_clip", 1.0))
-            scaler.step(opt)
-            scaler.update()
+            opt.step()
             return float(losses["loss"].detach())
 
         initial = step_loss()
@@ -280,7 +280,7 @@ def check_overfit(cfg: dict, device: torch.device) -> None:
         drop = (initial - final) / max(initial, 1e-8)
         if drop < 0.2:
             _fail(f"loss drop only {drop:.1%} (expected ≥20%); initial={initial:.4f} final={final:.4f}")
-            _hint("check grad flow; lower lr; disable AMP to isolate")
+            _hint("check grad flow; lower lr; re-run with --config a non-amp YAML to isolate")
             raise RuntimeError("overfit failed")
         _ok(f"loss {initial:.4f} → {final:.4f}  ({drop:.1%} drop)")
 
