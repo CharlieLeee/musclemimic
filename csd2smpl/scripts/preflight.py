@@ -141,26 +141,15 @@ def check_amass(amass_root: Path | None, deep_validate: bool = False) -> bool:
         )
         return False
 
-    # AMASS subsets ship final *_poses.npz plus MoSh++ intermediates
-    # (*_stagei.npz, *_stageii.npz, *_stageiii.npz) and per-subject shape
-    # files. Only *_poses.npz follows the schema we care about; the rest
-    # are discarded — mirrors synthesize_dataset.py's behaviour.
-    def _poses_files(root: Path) -> list[Path]:
-        poses = sorted(root.rglob("*_poses.npz"))
-        if poses:
-            return poses
-        # Very old/custom subsets sometimes drop the suffix; fall back and
-        # explicitly filter out known MoSh intermediates.
-        all_npz = sorted(root.rglob("*.npz"))
-        return [
-            f for f in all_npz
-            if not f.name.endswith(("_stagei.npz", "_stageii.npz", "_stageiii.npz"))
-            and "shape" not in f.name.lower()
-        ]
+    # Accept both modern *_poses.npz and older *_stageii.npz (ACCAD etc.).
+    # Delegate to the shared filter in csd2smpl.data.synthesize so preflight
+    # and synthesis always agree on which files are usable.
+    from csd2smpl.data.synthesize import amass_sequence_files
 
-    npz_per_subset = {d: _poses_files(amass_root / d) for d in overlap}
+    npz_per_subset = {d: amass_sequence_files(amass_root / d) for d in overlap}
     n_total = sum(len(v) for v in npz_per_subset.values())
-    _ok(f"{len(overlap)} sub-datasets present, {n_total} *_poses.npz files total")
+    _ok(f"{len(overlap)} sub-datasets present, {n_total} sequence NPZs total "
+        f"(*_poses.npz or *_stageii.npz)")
     for d, files in sorted(npz_per_subset.items()):
         marker = " (empty!)" if not files else ""
         print(f"      {d:25s} {len(files):5d} sequences{marker}")

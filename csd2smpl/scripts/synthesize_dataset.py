@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from csd2smpl.data.synthesize import synthesize_file
+from csd2smpl.data.synthesize import amass_sequence_files, synthesize_file
 
 
 def main() -> None:
@@ -44,9 +44,7 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
 
-    npz_files = sorted(args.amass_root.rglob("*_poses.npz"))
-    if not npz_files:
-        npz_files = sorted(args.amass_root.rglob("*.npz"))
+    npz_files = amass_sequence_files(args.amass_root)
     print(f"Found {len(npz_files)} AMASS sequences under {args.amass_root}")
     print(f"Marker layout: {args.layout}  placement: {args.placement}  ssm: {args.ssm_json}")
 

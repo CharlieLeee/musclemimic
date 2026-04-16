@@ -45,6 +45,32 @@ from csd2smpl.data.marker_layouts import (
 )
 
 
+def amass_sequence_files(root: Path | str) -> list[Path]:
+    """Find every AMASS sequence NPZ under ``root`` that matches our schema.
+
+    Accepts
+    -------
+    ``*_poses.npz`` — modern AMASS naming (body + hands + trans + betas).
+    ``*_stageii.npz`` — older subsets (e.g. ACCAD) ship MoSh stage-II
+        output directly, same schema as ``*_poses.npz``.
+
+    Rejects
+    -------
+    ``*_stagei.npz`` — per-subject neutral-pose shape calibration, no
+        ``poses`` / ``trans`` keys.
+    ``*_stageiii.npz`` — post-hoc retargeting, inconsistent schema.
+    ``*shape*.npz`` — standalone shape files.
+    """
+    root = Path(root)
+    # Walk once, partition by suffix.
+    valid: list[Path] = []
+    for f in sorted(root.rglob("*.npz")):
+        name = f.name.lower()
+        if name.endswith(("_poses.npz", "_stageii.npz")):
+            valid.append(f)
+    return valid
+
+
 def amass_to_smpl72(poses_amass: np.ndarray) -> np.ndarray:
     """Convert AMASS SMPL-H poses ``(T, 156)`` to SMPL-24 axis-angle ``(T, 72)``.
 
