@@ -93,6 +93,11 @@ gmr = [
     "general-motion-retargeting @ git+https://github.com/amathislab/gmr_plus.git",
 ]
 
+# C3D file visualization
+c3d = [
+    "ezc3d",
+]
+
 [project.scripts]
 
 # Dataset path configuration
