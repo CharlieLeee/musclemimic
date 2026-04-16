@@ -141,9 +141,26 @@ def check_amass(amass_root: Path | None, deep_validate: bool = False) -> bool:
         )
         return False
 
-    npz_per_subset = {d: list((amass_root / d).rglob("*.npz")) for d in overlap}
+    # AMASS subsets ship final *_poses.npz plus MoSh++ intermediates
+    # (*_stagei.npz, *_stageii.npz, *_stageiii.npz) and per-subject shape
+    # files. Only *_poses.npz follows the schema we care about; the rest
+    # are discarded — mirrors synthesize_dataset.py's behaviour.
+    def _poses_files(root: Path) -> list[Path]:
+        poses = sorted(root.rglob("*_poses.npz"))
+        if poses:
+            return poses
+        # Very old/custom subsets sometimes drop the suffix; fall back and
+        # explicitly filter out known MoSh intermediates.
+        all_npz = sorted(root.rglob("*.npz"))
+        return [
+            f for f in all_npz
+            if not f.name.endswith(("_stagei.npz", "_stageii.npz", "_stageiii.npz"))
+            and "shape" not in f.name.lower()
+        ]
+
+    npz_per_subset = {d: _poses_files(amass_root / d) for d in overlap}
     n_total = sum(len(v) for v in npz_per_subset.values())
-    _ok(f"{len(overlap)} sub-datasets present, {n_total} *.npz files total")
+    _ok(f"{len(overlap)} sub-datasets present, {n_total} *_poses.npz files total")
     for d, files in sorted(npz_per_subset.items()):
         marker = " (empty!)" if not files else ""
         print(f"      {d:25s} {len(files):5d} sequences{marker}")
