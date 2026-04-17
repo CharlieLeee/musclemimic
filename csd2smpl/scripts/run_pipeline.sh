@@ -133,14 +133,14 @@ fi
 # Extracts AMASS sub-dataset tarballs into $AMASS_DIR; idempotent.
 # Body-model archives are extracted into $SMPL_DIR with their own loop.
 if should_run extract; then
-    if [[ -n "$(find "$AMASS_DIR" -maxdepth 2 -name '*.npz' 2>/dev/null | head -1)" ]]; then
+    if [[ -n "$(find "$AMASS_DIR" -maxdepth 2 -name '*.npz' -print -quit 2>/dev/null)" ]]; then
         echo "[extract] AMASS already extracted under $AMASS_DIR (skip)"
     else
         run_log extract bash csd2smpl/scripts/download_amass.sh "$RAW_DIR" "$AMASS_DIR"
     fi
 
     # Body model: look for any tarball/zip whose name hints at SMPL.
-    if [[ -n "$(find "$SMPL_DIR" -maxdepth 2 -name '*.pkl' 2>/dev/null | head -1)" ]]; then
+    if [[ -n "$(find "$SMPL_DIR" -maxdepth 2 -name '*.pkl' -print -quit 2>/dev/null)" ]]; then
         echo "[extract] SMPL .pkl already present under $SMPL_DIR (skip)"
     else
         echo "[extract] Looking for SMPL body-model archive in $RAW_DIR ..."
@@ -197,7 +197,7 @@ if should_run extract; then
         # Remove now-empty nested dirs left behind by the zip layout.
         find "$SMPL_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 
-        if [[ -z "$(find "$SMPL_DIR" -maxdepth 1 -name 'SMPL_*.pkl' 2>/dev/null | head -1)" ]]; then
+        if [[ -z "$(find "$SMPL_DIR" -maxdepth 1 -name 'SMPL_*.pkl' -print -quit 2>/dev/null)" ]]; then
             echo "[extract] WARNING: no SMPL_*.pkl at top of $SMPL_DIR after extraction" >&2
         fi
     fi
@@ -226,7 +226,7 @@ fi
 
 # ── Step: synthesize ──────────────────────────────────────────
 if should_run synthesize; then
-    if [[ -n "$(find "$MARKERS_DIR" -name '*.markers.npz' 2>/dev/null | head -1)" ]]; then
+    if [[ -n "$(find "$MARKERS_DIR" -name '*.markers.npz' -print -quit 2>/dev/null)" ]]; then
         echo "[synthesize] markers already present under $MARKERS_DIR (skip; rm to regenerate)"
     else
         run_log synthesize python -m csd2smpl.scripts.synthesize_dataset \
@@ -262,7 +262,7 @@ if should_run predict; then
         echo "[predict] no checkpoint at $CKPT_DIR/best.pt — train first" >&2
         exit 1
     fi
-    if [[ -n "$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)" ]]; then
+    if [[ -n "$(find "$PRED_DIR" -name '*.pred.npz' -print -quit 2>/dev/null)" ]]; then
         echo "[predict] predictions already present under $PRED_DIR (skip; rm to regenerate)"
     else
         run_log predict python -m csd2smpl.predict \
@@ -284,7 +284,7 @@ if should_run visualize; then
     else
         mkdir -p "$EXAMPLE_DIR"
         if [[ ! -f "$EXAMPLE_PRED" ]]; then
-            src="$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)"
+            src="$(find "$PRED_DIR" -name '*.pred.npz' -print -quit 2>/dev/null)"
             if [[ -z "$src" ]]; then
                 echo "[visualize] no .pred.npz under $PRED_DIR — run predict first" >&2
                 exit 1
@@ -317,7 +317,7 @@ if should_run render_mujoco; then
         echo "[render_mujoco] $EXAMPLE_DIR/example_muscle.mp4 exists (skip; rm to regenerate)"
     else
         if [[ ! -f "$EXAMPLE_PRED" ]]; then
-            src="$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)"
+            src="$(find "$PRED_DIR" -name '*.pred.npz' -print -quit 2>/dev/null)"
             if [[ -z "$src" ]]; then
                 echo "[render_mujoco] no .pred.npz under $PRED_DIR — run predict first" >&2
                 exit 1
@@ -341,7 +341,7 @@ if should_run render_mujoco; then
                 --video-name example_muscle
 
         # retarget_visualize nests the mp4 under <tag>/<name>.mp4; find and hoist it.
-        found="$(find "$raw_out" -name 'example_muscle*.mp4' 2>/dev/null | head -1)"
+        found="$(find "$raw_out" -name 'example_muscle*.mp4' -print -quit 2>/dev/null)"
         if [[ -z "$found" ]]; then
             echo "[render_mujoco] no mp4 produced under $raw_out" >&2
             exit 1
