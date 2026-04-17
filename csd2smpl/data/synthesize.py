@@ -45,6 +45,33 @@ from csd2smpl.data.marker_layouts import (
 )
 
 
+def _resolve_smplx_model_path(model_path: str | Path) -> str:
+    """Return the path smplx expects, given where the .pkl files actually live.
+
+    smplx.create appends ``model_type`` (e.g. ``"smpl"``) as a subdirectory
+    internally, so the ``model_path`` argument must be the *parent* of the
+    ``smpl/`` directory, not the directory containing the .pkl files.
+
+    This helper accepts either layout:
+
+    - ``<dir>/SMPL_NEUTRAL.pkl``           — flat; returns ``<dir>/..``
+    - ``<dir>/smpl/SMPL_NEUTRAL.pkl``      — nested; returns ``<dir>``
+
+    Anything else passes through unchanged so smplx raises its own
+    descriptive error.
+    """
+    p = Path(model_path).resolve()
+    if (p / "SMPL_NEUTRAL.pkl").exists() \
+            or (p / "SMPL_MALE.pkl").exists() \
+            or (p / "SMPL_FEMALE.pkl").exists():
+        return str(p.parent)
+    if (p / "smpl" / "SMPL_NEUTRAL.pkl").exists() \
+            or (p / "smpl" / "SMPL_MALE.pkl").exists() \
+            or (p / "smpl" / "SMPL_FEMALE.pkl").exists():
+        return str(p)
+    return str(p)
+
+
 def amass_sequence_files(root: Path | str) -> list[Path]:
     """Find every AMASS sequence NPZ under ``root`` that matches our schema.
 
@@ -145,7 +172,7 @@ def smpl_forward(
     import smplx  # imported lazily so the package is inspectable without it
 
     body_model = smplx.create(
-        model_path,
+        _resolve_smplx_model_path(model_path),
         model_type="smpl",
         gender=gender,
         num_betas=10,
