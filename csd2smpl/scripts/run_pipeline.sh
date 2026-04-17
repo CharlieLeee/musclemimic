@@ -55,6 +55,9 @@ mkdir -p "$CSD_HOME" "$AMASS_DIR" "$SMPL_DIR" "$MARKERS_DIR" \
 # Reduce CUDA fragmentation in shared scenarios.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 
+# Line-buffer Python stdout/stderr so `tee` sees progress live, not in chunks.
+export PYTHONUNBUFFERED=1
+
 # Activate venv if present (setup_cluster.sh creates it).
 if [[ -f "$VENV/bin/activate" ]]; then
     # shellcheck disable=SC1091
