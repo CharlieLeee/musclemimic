@@ -197,6 +197,7 @@ def main():
     # Configure model-specific parameters (camera uses env defaults like validation_video_recorder)
     env_params = {
         "env_params": {"timestep": 0.002, "n_substeps": 5},
+        "th_params": {"random_start": False, "fixed_start_conf": (0, 0)},
         "headless": is_headless,
     }
     if custom_traj is not None:
@@ -220,7 +221,7 @@ def main():
 
     # Goal params for visualization
     goal_params = {
-        "visualize_goal": True,
+        "visualize_goal": False,
         "enable_enhanced_visualization": True,
         "target_geom_rgba": [0.471, 0.38, 0.812, 0.6],
     }
