@@ -1,7 +1,7 @@
 import dataclasses
 import random
-import numpy as np
 
+import numpy as np
 from omegaconf import DictConfig, ListConfig
 
 from loco_mujoco.datasets.humanoids.LAFAN1 import (
@@ -18,8 +18,11 @@ from loco_mujoco.trajectory import Trajectory, TrajectoryHandler
 
 from .base import TaskFactory
 from .dataset_confs import (
-    AMASSDatasetConf, CustomDatasetConf, LAFAN1DatasetConf,
-    get_amass_dataset_groups, expand_amass_dataset_group_spec,
+    AMASSDatasetConf,
+    CustomDatasetConf,
+    LAFAN1DatasetConf,
+    expand_amass_dataset_group_spec,
+    get_amass_dataset_groups,
 )
 
 
@@ -142,7 +145,24 @@ class ImitationFactory(TaskFactory):
             parent_body_ids = None
             root_body_id = None
             if sparse_body_data:
-                parent_body_ids, root_body_id = cls._get_sparse_body_mapping(env, all_trajs[0])
+                traj_site_names = getattr(all_trajs[0].info, "site_names", None)
+                has_sparse_body_inputs = (
+                    getattr(all_trajs[0].data, "cvel", None) is not None
+                    and getattr(all_trajs[0].data, "subtree_com", None) is not None
+                    and all_trajs[0].data.cvel.size > 0
+                    and all_trajs[0].data.subtree_com.size > 0
+                )
+                if traj_site_names is None or len(traj_site_names) == 0:
+                    print("[ImitationFactory] INFO: Trajectory has no site_names; disabling sparse_body_data for this load.")
+                    sparse_body_data = False
+                elif not has_sparse_body_inputs:
+                    print(
+                        "[ImitationFactory] INFO: Trajectory has no body-level kinematics for sparse extraction; "
+                        "disabling sparse_body_data for this load."
+                    )
+                    sparse_body_data = False
+                else:
+                    parent_body_ids, root_body_id = cls._get_sparse_body_mapping(env, all_trajs[0])
 
             # Concatenate trajectories on CPU
             all_trajs = Trajectory.concatenate(
@@ -333,12 +353,15 @@ class ImitationFactory(TaskFactory):
             Trajectory: The custom trajectories.
 
         """
+        from loco_mujoco.smpl.retargeting import extend_motion
+
         traj = custom_dataset_conf.traj
-        # # extend the motion to the desired length
-        # if not traj.data.is_complete:
-        #     env_name = env.__class__.__name__
-        #     env_params = {}
-        #     traj = extend_motion(env_name, env_params, traj)
+        # Retargeted custom motions often start with qpos/qvel plus partial site data.
+        # Extend them to full body/site kinematics before handing them to the trajectory handler.
+        if not traj.data.is_complete:
+            env_name = env.__class__.__name__
+            env_params = {}
+            traj = extend_motion(env_name, env_params, traj)
 
         # pass the default trajectory through a TrajectoryHandler to interpolate it to the environment frequency
         # and to filter out or add necessary entities is needed

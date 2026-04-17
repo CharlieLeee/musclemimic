@@ -1,7 +1,9 @@
-# Example usage: uv run examples/retargeting/retarget_visualize.py --motion "KIT/6/WalkInCounterClockwiseCircle06_1_poses"  --record
+# Example usage:
+#   uv run examples/retargeting/retarget_visualize.py --motion "KIT/6/WalkInCounterClockwiseCircle06_1_poses"  --record
+#   uv run --extra c3d --extra smpl examples/retargeting/retarget_visualize.py --c3d-file path/to/file.c3d
 import argparse
 
-from loco_mujoco.task_factories import ImitationFactory, AMASSDatasetConf
+from loco_mujoco.task_factories import AMASSDatasetConf, CustomDatasetConf, ImitationFactory
 from musclemimic.utils import detect_headless_environment, setup_headless_rendering
 
 
@@ -37,6 +39,12 @@ def parse_arguments():
         type=str,
         default=None,
         help="Dataset group from loco_mujoco.smpl.const",
+    )
+    parser.add_argument(
+        "--c3d-file",
+        type=str,
+        default=None,
+        help="Path to a C3D file. Fits SMPL, retargets, and visualizes on the musculoskeletal model.",
     )
 
     # Retargeting method
@@ -75,6 +83,72 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def _c3d_to_trajectory(args):
+    """Convert C3D file to a retargeted trajectory via SMPL fitting."""
+    import logging
+    import os
+    from pathlib import Path
+
+    from loco_mujoco.smpl.retargeting import (
+        OPTIMIZED_SHAPE_FILE_NAME,
+        fit_gmr_motion,
+        fit_smpl_motion,
+        fit_smpl_shape,
+        get_converted_amass_dataset_path,
+        get_smpl_model_path,
+        load_robot_conf_file,
+    )
+    from musclemimic.web_viewer.c3d_to_smpl import fit_smpl_to_c3d_cached, save_motion_data_as_amass_smplh_npz
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    log = logging.getLogger("c3d_pipeline")
+
+    c3d_path = args.c3d_file
+    model_name = args.model
+
+    smpl_model_path = get_smpl_model_path()
+    if not Path(smpl_model_path).exists():
+        raise SystemExit(f"SMPL model not found at {smpl_model_path}. Run: musclemimic-set-smpl-model-path <path>")
+
+    log.info("[1/3] Fitting SMPL to C3D: %s", c3d_path)
+    motion_data = fit_smpl_to_c3d_cached(c3d_path, smpl_model_path)
+
+    log.info("[2/3] Retargeting SMPL → %s...", model_name)
+    robot_conf = load_robot_conf_file(model_name)
+
+    cache_env = model_name.replace("Mjx", "") if "Mjx" in model_name else model_name
+    shape_path = os.path.join(get_converted_amass_dataset_path(), cache_env, OPTIMIZED_SHAPE_FILE_NAME)
+    if not os.path.exists(shape_path):
+        log.info("Fitting SMPL shape to robot (one-time)...")
+        os.makedirs(os.path.dirname(shape_path), exist_ok=True)
+        fit_smpl_shape(model_name, robot_conf, smpl_model_path, shape_path, log)
+
+    if args.retargeting_method == "gmr":
+        gmr_motion_path = save_motion_data_as_amass_smplh_npz(
+            motion_data,
+            Path(c3d_path).parent / ".smpl_cache" / f"{Path(c3d_path).stem}_smplh_for_gmr.npz",
+        )
+        trajectory, _ = fit_gmr_motion(
+            model_name,
+            robot_conf,
+            str(gmr_motion_path),
+            log,
+            {
+                "src_human": args.gmr_src_human,
+                "target_fps": args.gmr_target_fps,
+                "solver": args.gmr_solver,
+                "damping": args.gmr_damping,
+                "offset_to_ground": args.gmr_offset_to_ground,
+                "use_velocity_limit": args.gmr_use_velocity_limit,
+                "verbose": args.gmr_verbose,
+            },
+        )
+    else:
+        trajectory, _ = fit_smpl_motion(model_name, robot_conf, smpl_model_path, motion_data, shape_path, log)
+    log.info("[3/3] Retargeting complete.")
+    return trajectory
+
+
 def main():
     args = parse_arguments()
 
@@ -86,43 +160,53 @@ def main():
     # Build dataset configuration
     motions = args.motion if args.motion is not None else []
 
-    if motions:
-        dataset_conf = AMASSDatasetConf(motions)
+    custom_traj = None
+    if args.c3d_file:
+        custom_traj = _c3d_to_trajectory(args)
+        print(f"Model: {args.model}")
+        print(f"Source: C3D file → {args.c3d_file}")
+        print(f"Retargeting Method: {args.retargeting_method.upper()}")
     else:
-        dataset_conf = AMASSDatasetConf(dataset_group=args.dataset_group)
+        if motions:
+            dataset_conf = AMASSDatasetConf(motions)
+        else:
+            dataset_conf = AMASSDatasetConf(dataset_group=args.dataset_group)
 
-    # Configure retargeting method
-    dataset_conf.retargeting_method = args.retargeting_method
-    if args.retargeting_method == "gmr":
-        dataset_conf.gmr_config = {
-            "src_human": args.gmr_src_human,
-            "target_fps": args.gmr_target_fps,
-            "solver": args.gmr_solver,
-            "damping": args.gmr_damping,
-            "offset_to_ground": args.gmr_offset_to_ground,
-            "use_velocity_limit": args.gmr_use_velocity_limit,
-            "verbose": args.gmr_verbose,
-        }
+        # Configure retargeting method
+        dataset_conf.retargeting_method = args.retargeting_method
+        if args.retargeting_method == "gmr":
+            dataset_conf.gmr_config = {
+                "src_human": args.gmr_src_human,
+                "target_fps": args.gmr_target_fps,
+                "solver": args.gmr_solver,
+                "damping": args.gmr_damping,
+                "offset_to_ground": args.gmr_offset_to_ground,
+                "use_velocity_limit": args.gmr_use_velocity_limit,
+                "verbose": args.gmr_verbose,
+            }
 
-    print(f"Model: {args.model}")
-    print(f"Retargeting Method: {args.retargeting_method.upper()}")
-    if motions:
-        print("Motions:")
-        for m in motions:
-            print(f"  - {m}")
-    if args.retargeting_method == "gmr":
-        print(f"  GMR Solver: {args.gmr_solver}, FPS: {args.gmr_target_fps}")
+        print(f"Model: {args.model}")
+        print(f"Retargeting Method: {args.retargeting_method.upper()}")
+        if motions:
+            print("Motions:")
+            for m in motions:
+                print(f"  - {m}")
+        if args.retargeting_method == "gmr":
+            print(f"  GMR Solver: {args.gmr_solver}, FPS: {args.gmr_target_fps}")
 
     # Configure model-specific parameters (camera uses env defaults like validation_video_recorder)
     env_params = {
-        "amass_dataset_conf": dataset_conf,
         "env_params": {"timestep": 0.002, "n_substeps": 5},
         "headless": is_headless,
     }
+    if custom_traj is not None:
+        env_params["custom_dataset_conf"] = CustomDatasetConf(traj=custom_traj)
+    else:
+        env_params["amass_dataset_conf"] = dataset_conf
 
     # Add terrain randomization if enabled
     if args.terrain:
-        print(f"\nTerrain Randomization: ON")
+        print("\nTerrain Randomization: ON")
         print(f"  Height range: ±{args.terrain_height}m")
         print(f"  Platform size: {args.terrain_platform}m")
         env_params["terrain_type"] = "RoughTerrain"
@@ -152,7 +236,7 @@ def main():
     env = ImitationFactory.make(args.model, **env_params)
 
     # Print trajectory info
-    print(f"\nTrajectory Info:")
+    print("\nTrajectory Info:")
     print(f"  Control frequency: {1.0/env.dt:.1f} Hz")
     print(f"  Trajectory frequency: {env.th.traj.info.frequency:.1f} Hz")
     print(f"  Trajectory length: {len(env.th.traj.data.qpos)} frames")
@@ -179,8 +263,8 @@ def main():
         print(f"\nRecording to: {args.output_dir}/{args.model.lower()}_retargeted/{video_name}.mp4 ({fps} FPS)")
 
     env.play_trajectory(
-        n_episodes=args.n_episodes,
-        n_steps_per_episode=args.n_steps,
+        n_episodes=None,
+        n_steps_per_episode=None,
         render=True,
         record=args.record,
         recorder_params=recorder_params,

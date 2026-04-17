@@ -453,6 +453,8 @@ def fit_smpl_motion(
 
     qpos = np.zeros((len_traj, env._model.nq))
     num_matched = len(smpl2mimic_site_idx)
+    site_xpos = np.zeros((len_traj, len(site_ids), 3), dtype=np.float32)
+    site_xmat = np.zeros((len_traj, len(site_ids), 9), dtype=np.float32)
 
     dist_array = np.zeros((len_traj, num_matched))
     site_ids = [mujoco.mj_name2id(env._model, mujoco.mjtObj.mjOBJ_SITE, s) for s in sites_for_mimic]
@@ -477,6 +479,8 @@ def fit_smpl_motion(
         pen, _geom_id, _floor_id = max_penetration_with_floor(env._model, env._data)
         if pen < 0:
             qpos[i][2] -= pen
+            env._data.qpos = qpos[i]
+            mujoco.mj_forward(env._model, env._data)
 
         # TODO: test with overall ground penetration
         # max_pen = min(max_pen, pen)
@@ -485,6 +489,8 @@ def fit_smpl_motion(
             current_pos = env._data.site_xpos[site_id]  # real robot site position
             target_pos = mocap_pos[k].cpu().numpy()  # target from SMPL
             dist_array[i, k] = np.linalg.norm(current_pos - target_pos)
+            site_xpos[i, k] = current_pos
+            site_xmat[i, k] = env._data.site_xmat[site_id]
 
         if visualize:
             env.render()
@@ -502,18 +508,44 @@ def fit_smpl_motion(
 
     # Compute qvel from qpos using helper function
     qpos, qvel = _compute_qvel_from_qpos(qpos, fps, env.root_free_joint_xml_name, env._model)
+    site_xpos = site_xpos[1:-1]
+    site_xmat = site_xmat[1:-1]
 
     njnt = env._model.njnt
     jnt_type = env._model.jnt_type
     jnt_names = [mujoco.mj_id2name(env._model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(njnt)]
 
+    site_ids_array = jnp.array(site_ids)
+    traj_model = TrajectoryModel(
+        njnt=njnt,
+        jnt_type=jnp.array(jnt_type),
+        nbody=env._model.nbody,
+        body_rootid=jnp.array(env._model.body_rootid),
+        body_weldid=jnp.array(env._model.body_weldid),
+        body_mocapid=jnp.array(env._model.body_mocapid),
+        body_pos=jnp.array(env._model.body_pos),
+        body_quat=jnp.array(env._model.body_quat),
+        body_ipos=jnp.array(env._model.body_ipos),
+        body_iquat=jnp.array(env._model.body_iquat),
+        nsite=len(site_ids),
+        site_bodyid=jnp.array(env._model.site_bodyid)[site_ids_array],
+        site_pos=jnp.array(env._model.site_pos)[site_ids_array],
+        site_quat=jnp.array(env._model.site_quat)[site_ids_array],
+    )
     traj_info = TrajectoryInfo(
         jnt_names,
-        model=TrajectoryModel(njnt, jnp.array(jnt_type)),
+        model=traj_model,
         frequency=fps,
+        site_names=sites_for_mimic,
     )
 
-    traj_data = TrajectoryData(jnp.array(qpos), jnp.array(qvel), split_points=jnp.array([0, len(qpos)]))
+    traj_data = TrajectoryData(
+        jnp.array(qpos),
+        jnp.array(qvel),
+        site_xpos=jnp.array(site_xpos),
+        site_xmat=jnp.array(site_xmat),
+        split_points=jnp.array([0, len(qpos)]),
+    )
 
     analysis = {
         "pos_error": dist_array,
@@ -884,6 +916,12 @@ def fit_gmr_motion(
     qpos_list = []
     dist_list = []
     lowest_z_list = []
+    traj_site_names = getattr(env, "sites_for_mimic", None)
+    traj_site_ids = None
+    if traj_site_names is not None:
+        traj_site_ids = [mujoco.mj_name2id(env._model, mujoco.mjtObj.mjOBJ_SITE, s) for s in traj_site_names]
+    site_xpos_list = []
+    site_xmat_list = []
 
     data = retarget.configuration.data
 
@@ -905,6 +943,9 @@ def fit_gmr_motion(
         qpos_list.append(qpos_frame.copy())
         dist_list.append(dist.copy())
         lowest_z_list.append(lowest_z)
+        if traj_site_ids is not None:
+            site_xpos_list.append(np.array(data.site_xpos[traj_site_ids], copy=True))
+            site_xmat_list.append(np.array(data.site_xmat[traj_site_ids], copy=True))
 
     t_total = time.perf_counter() - t_start
     retarget_fps = len(smplh_frames) / t_total if t_total > 0 else float("inf")
@@ -936,22 +977,59 @@ def fit_gmr_motion(
 
     # Compute velocities
     qpos, qvel = _compute_qvel_from_qpos(qpos, aligned_fps, env.root_free_joint_xml_name, env._model)
+    if site_xpos_list:
+        site_xpos = np.asarray(site_xpos_list, dtype=np.float32)[1:-1]
+        site_xmat = np.asarray(site_xmat_list, dtype=np.float32)[1:-1]
+    else:
+        site_xpos = np.zeros((len(qpos), 0, 3), dtype=np.float32)
+        site_xmat = np.zeros((len(qpos), 0, 9), dtype=np.float32)
 
     # Build Trajectory (minimal - extend_motion adds xpos/xquat/sites)
     njnt = env._model.njnt
     jnt_names = [mujoco.mj_id2name(env._model, mujoco.mjtObj.mjOBJ_JOINT, i) for i in range(njnt)]
 
+    traj_site_names = getattr(env, "sites_for_mimic", None)
+    if traj_site_names is not None:
+        traj_site_ids = [mujoco.mj_name2id(env._model, mujoco.mjtObj.mjOBJ_SITE, s) for s in traj_site_names]
+        traj_site_ids_array = jnp.array(traj_site_ids)
+        traj_model = TrajectoryModel(
+            njnt=njnt,
+            jnt_type=jnp.array(env._model.jnt_type),
+            nbody=env._model.nbody,
+            body_rootid=jnp.array(env._model.body_rootid),
+            body_weldid=jnp.array(env._model.body_weldid),
+            body_mocapid=jnp.array(env._model.body_mocapid),
+            body_pos=jnp.array(env._model.body_pos),
+            body_quat=jnp.array(env._model.body_quat),
+            body_ipos=jnp.array(env._model.body_ipos),
+            body_iquat=jnp.array(env._model.body_iquat),
+            nsite=len(traj_site_ids),
+            site_bodyid=jnp.array(env._model.site_bodyid)[traj_site_ids_array],
+            site_pos=jnp.array(env._model.site_pos)[traj_site_ids_array],
+            site_quat=jnp.array(env._model.site_quat)[traj_site_ids_array],
+        )
+    else:
+        traj_model = TrajectoryModel(njnt, jnp.array(env._model.jnt_type))
+
     traj_info = TrajectoryInfo(
         jnt_names,
-        model=TrajectoryModel(njnt, jnp.array(env._model.jnt_type)),
+        model=traj_model,
         frequency=aligned_fps,
+        site_names=traj_site_names,
     )
 
-    traj_data = TrajectoryData(jnp.array(qpos), jnp.array(qvel), split_points=jnp.array([0, len(qpos)]))
+    traj_data = TrajectoryData(
+        jnp.array(qpos),
+        jnp.array(qvel),
+        site_xpos=jnp.array(site_xpos),
+        site_xmat=jnp.array(site_xmat),
+        split_points=jnp.array([0, len(qpos)]),
+    )
 
     analysis = {
         "pos_error": dist_array,
         "retarget_fps": retarget_fps,
+        "site_names": getattr(env, "sites_for_mimic", None),
     }
 
     return Trajectory(traj_info, traj_data), analysis
