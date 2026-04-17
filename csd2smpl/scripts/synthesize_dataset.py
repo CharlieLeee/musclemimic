@@ -19,12 +19,10 @@ import argparse
 import time
 from pathlib import Path
 
-import ezc3d
 import numpy as np
 import torch
 
 from csd2smpl.data.synthesize import amass_sequence_files, synthesize_file
-from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, compute_loss, smpl_forward
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -36,7 +34,9 @@ def _fmt_eta(seconds: float) -> str:
 
 def run_c3d_to_smpl(c3d_file: str, amass_file: str) -> None:
     """Convert a C3D file to SMPL predictions and compute loss against AMASS ground truth."""
- 
+    import ezc3d
+    from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, compute_loss, smpl_forward
+
     # Load C3D marker data
     c3d = ezc3d.c3d(c3d_file)
     markers = c3d['data']['points'][:3].T  # shape: (T, N, 3) in mm

@@ -16,3 +16,7 @@ pyyaml>=6.0
 # Stage-1 (synthesize) and Stage-3 (evaluate) require smplx + an SMPL .pkl
 # body model from https://smpl.is.tue.mpg.de/. Comment out for arch-only smoke.
 smplx>=0.1.28
+
+# Optional: only needed by csd2smpl.scripts.visualize_pred.
+matplotlib>=3.7
+imageio[ffmpeg]>=2.34
