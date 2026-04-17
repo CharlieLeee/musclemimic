@@ -24,6 +24,42 @@ from warp import torch
 
 from csd2smpl.data.synthesize import synthesize_file
 from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, smpl_forward, compute_loss
+import ezc3d
+
+
+def run_c3d_to_smpl(c3d_file: str, amass_file: str) -> None:
+    """Convert a C3D file to SMPL predictions and compute loss against AMASS ground truth."""
+ 
+    # Load C3D marker data
+    c3d = ezc3d.c3d(c3d_file)
+    markers = c3d['data']['points'][:3].T  # shape: (T, N, 3) in mm
+    markers /= 1000.0                      # convert to meters
+ 
+    # Load AMASS SMPL ground truth
+    amass_data = np.load(amass_file)
+    gt_pose = torch.tensor(amass_data['pose'], dtype=torch.float32)
+    gt_shape = torch.tensor(amass_data['shape'], dtype=torch.float32)
+    gt_joints, _ = smpl_forward(gt_pose, gt_shape)
+ 
+    # Instantiate the neural network model
+    model = MarkerToSMPL(n_markers=markers.shape[1])
+ 
+    # Prepare input: flatten markers to (T, N*3)
+    markers_flat = torch.tensor(markers, dtype=torch.float32).reshape(markers.shape[0], -1)
+ 
+    # Inference
+    with torch.no_grad():
+        pred_pose, pred_shape = model(markers_flat)
+ 
+    # Use mean shape across time for consistency (shape is typically constant per person)
+    pred_shape_mean = pred_shape.mean(dim=0, keepdim=True).repeat(pred_pose.shape[0], 1)
+ 
+    # Compute predicted SMPL joints and vertices
+    pred_joints, pred_verts = smpl_forward(pred_pose, pred_shape_mean)
+ 
+    # Compute loss between predicted SMPL and AMASS SMPL
+    loss = compute_loss(pred_joints, pred_verts, gt_joints, gt_pose)
+    print(f"Loss: {loss.item()}")
 
 
 def main() -> None:
@@ -76,45 +112,6 @@ def main() -> None:
             print(f"  {i}/{len(npz_files)}: {rel}")
 
     print(f"Done. Wrote {n_written}/{len(npz_files)} files to {args.out_root}")
-
-
- 
-    ### ---------------- Convert c2d to SMPLpred ----------- ---------------- ###
-
-    # Input files: c3d file and AMASS SMPL file
-    c3d_file = sys.argv[1] if len(sys.argv) > 1 else "motion.c3d"
-    amass_file = sys.argv[2] if len(sys.argv) > 2 else "amass.npz"
-
-    c3d = ezc3d.c3d(c3d_file)
-    markers = c3d['data']['points'][:3].T  # shape: (T, N, 3) in mm
-    markers /= 1000.0  # convert to meters
-
-    # Load AMASS SMPL ground truth
-    amass_data = np.load(amass_file)
-    gt_pose = torch.tensor(amass_data['pose'], dtype=torch.float32)
-    gt_shape = torch.tensor(amass_data['shape'], dtype=torch.float32)
-    gt_joints, _ = smpl_forward(gt_pose, gt_shape)
-
-    # Instantiate the neural network model
-    model = MarkerToSMPL(n_markers=markers.shape[1])
-
-    # Prepare input data: flatten markers to (T, N*3)
-    markers_flat = torch.tensor(markers, dtype=torch.float32).reshape(markers.shape[0], -1)
-
-    # Perform inference to compute predicted SMPL pose and shape
-    with torch.no_grad():
-        pred_pose, pred_shape = model(markers_flat)
-
-    # Use mean shape across time for consistency (shape is typically constant per person)
-    pred_shape_mean = pred_shape.mean(dim=0, keepdim=True).repeat(pred_pose.shape[0], 1)
-
-    # Compute predicted SMPL joints and vertices
-    pred_joints, pred_verts = smpl_forward(pred_pose, pred_shape_mean)
-
-    # Compute loss between predicted SMPL and AMASS SMPL
-    loss = compute_loss(pred_joints, pred_verts, gt_joints, gt_pose)
-    print(f"Loss: {loss.item()}")
-
 
 
 
