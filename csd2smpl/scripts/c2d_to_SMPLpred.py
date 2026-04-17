@@ -1,4 +1,3 @@
-import ezc3d
 import numpy as np
 import sys
 import torch
@@ -28,7 +27,7 @@ class MarkerToSMPL(nn.Module):
     
 
 
-def smpl_forward(pose, shape):
+def smpl_forward(pose, shape, smpl):
     out = smpl(
         body_pose=pose[:, 3:],
         global_orient=pose[:, :3],
@@ -40,17 +39,17 @@ def smpl_forward(pose, shape):
 
 
 
-def compute_loss(pred_joints, pred_verts, gt_joints_3d, gt_pose=None):
-    
+def compute_loss(pred_pose, pred_joints, gt_joints_3d, gt_pose=None):
+
     # Joint position loss (main signal)
     loss_joints = F.mse_loss(pred_joints[:, :24], gt_joints_3d)
-    
+
     # Pose regression loss (if GT SMPL params available)
     loss_pose = F.mse_loss(pred_pose, gt_pose) if gt_pose is not None else 0
-    
+
     # Smoothness regularization (temporal)
     loss_smooth = F.mse_loss(pred_pose[1:], pred_pose[:-1])
-    
+
     return loss_joints + 0.1 * loss_pose + 0.01 * loss_smooth
 
 

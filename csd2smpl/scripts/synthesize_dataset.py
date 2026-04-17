@@ -32,40 +32,57 @@ def _fmt_eta(seconds: float) -> str:
     return f"{h:d}h{m:02d}m{s:02d}s" if h else f"{m:d}m{s:02d}s"
 
 
-def run_c3d_to_smpl(c3d_file: str, amass_file: str) -> None:
+def run_c3d_to_smpl(c3d_file: str, amass_file: str, model_path: str,
+                    gender: str = "neutral") -> None:
     """Convert a C3D file to SMPL predictions and compute loss against AMASS ground truth."""
     import ezc3d
+    import smplx
     from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, compute_loss, smpl_forward
 
     # Load C3D marker data
     c3d = ezc3d.c3d(c3d_file)
     markers = c3d['data']['points'][:3].T  # shape: (T, N, 3) in mm
     markers /= 1000.0                      # convert to meters
- 
+
     # Load AMASS SMPL ground truth
     amass_data = np.load(amass_file)
     gt_pose = torch.tensor(amass_data['pose'], dtype=torch.float32)
     gt_shape = torch.tensor(amass_data['shape'], dtype=torch.float32)
-    gt_joints, _ = smpl_forward(gt_pose, gt_shape)
- 
+
+    # Resolve SMPL pkl directly (mirrors csd2smpl/scripts/visualize_pred.py), since
+    # smplx.create nests `smpl/` under model_path which may not match our layout.
+    pkl_candidates = [
+        Path(model_path) / f"SMPL_{gender.upper()}.pkl",
+        Path(model_path) / "smpl" / f"SMPL_{gender.upper()}.pkl",
+    ]
+    pkl_path = next((p for p in pkl_candidates if p.exists()), None)
+    if pkl_path is None:
+        raise FileNotFoundError(
+            f"SMPL_{gender.upper()}.pkl not found under {model_path}"
+        )
+    smpl = smplx.SMPL(model_path=str(pkl_path), gender=gender,
+                      batch_size=gt_pose.shape[0])
+
+    gt_joints, _ = smpl_forward(gt_pose, gt_shape, smpl)
+
     # Instantiate the neural network model
     model = MarkerToSMPL(n_markers=markers.shape[1])
- 
+
     # Prepare input: flatten markers to (T, N*3)
     markers_flat = torch.tensor(markers, dtype=torch.float32).reshape(markers.shape[0], -1)
- 
+
     # Inference
     with torch.no_grad():
         pred_pose, pred_shape = model(markers_flat)
- 
+
     # Use mean shape across time for consistency (shape is typically constant per person)
     pred_shape_mean = pred_shape.mean(dim=0, keepdim=True).repeat(pred_pose.shape[0], 1)
- 
+
     # Compute predicted SMPL joints and vertices
-    pred_joints, pred_verts = smpl_forward(pred_pose, pred_shape_mean)
- 
+    pred_joints, _pred_verts = smpl_forward(pred_pose, pred_shape_mean, smpl)
+
     # Compute loss between predicted SMPL and AMASS SMPL
-    loss = compute_loss(pred_joints, pred_verts, gt_joints, gt_pose)
+    loss = compute_loss(pred_pose, pred_joints, gt_joints, gt_pose)
     print(f"Loss: {loss.item()}")
 
 
@@ -98,6 +115,16 @@ def main() -> None:
                         help="Path to the corresponding AMASS .npz ground-truth file (optional)")
 
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------ #
+    # Optional diagnostic: C3D → SMPL inference sanity check.
+    # Only runs when BOTH --c3d_file and --amass_file are provided; leaves
+    # the main pipeline path (run_pipeline.sh -> synthesize) untouched.
+    # ------------------------------------------------------------------ #
+    if args.c3d_file is not None or args.amass_file is not None:
+        if args.c3d_file is None or args.amass_file is None:
+            parser.error("--c3d_file and --amass_file must be provided together")
+        run_c3d_to_smpl(args.c3d_file, args.amass_file, str(args.model_path))
 
     # ------------------------------------------------------------------ #
     # Stage 1 – synthesize marker NPZs from AMASS
