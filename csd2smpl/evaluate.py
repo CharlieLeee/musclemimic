@@ -24,6 +24,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from csd2smpl.data.c3d_dataset import MarkerDataset
+from csd2smpl.data.synthesize import _resolve_smplx_model_path
 from csd2smpl.models.pipeline import Markers2SMPL
 
 
@@ -92,7 +93,8 @@ def evaluate(cfg: dict, ckpt_path: str, split: str, smpl_dir: str) -> None:
     model.eval()
 
     smpl = smplx.create(
-        smpl_dir, model_type="smpl", num_betas=10,
+        _resolve_smplx_model_path(smpl_dir),
+        model_type="smpl", num_betas=10,
         batch_size=cfg["batch_size"] * cfg["seq_len"],
     ).to(device)
 

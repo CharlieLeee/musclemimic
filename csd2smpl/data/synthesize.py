@@ -45,6 +45,59 @@ from csd2smpl.data.marker_layouts import (
 )
 
 
+def _resolve_smplx_model_path(model_path: str | Path) -> str:
+    """Return the path smplx expects, given where the .pkl files actually live.
+
+    smplx.create appends ``model_type`` (e.g. ``"smpl"``) as a subdirectory
+    internally, so the ``model_path`` argument must be the *parent* of the
+    ``smpl/`` directory, not the directory containing the .pkl files.
+
+    This helper accepts either layout:
+
+    - ``<dir>/SMPL_NEUTRAL.pkl``           — flat; returns ``<dir>/..``
+    - ``<dir>/smpl/SMPL_NEUTRAL.pkl``      — nested; returns ``<dir>``
+
+    Anything else passes through unchanged so smplx raises its own
+    descriptive error.
+    """
+    p = Path(model_path).resolve()
+    if (p / "SMPL_NEUTRAL.pkl").exists() \
+            or (p / "SMPL_MALE.pkl").exists() \
+            or (p / "SMPL_FEMALE.pkl").exists():
+        return str(p.parent)
+    if (p / "smpl" / "SMPL_NEUTRAL.pkl").exists() \
+            or (p / "smpl" / "SMPL_MALE.pkl").exists() \
+            or (p / "smpl" / "SMPL_FEMALE.pkl").exists():
+        return str(p)
+    return str(p)
+
+
+def amass_sequence_files(root: Path | str) -> list[Path]:
+    """Find every AMASS sequence NPZ under ``root`` that matches our schema.
+
+    Accepts
+    -------
+    ``*_poses.npz`` — modern AMASS naming (body + hands + trans + betas).
+    ``*_stageii.npz`` — older subsets (e.g. ACCAD) ship MoSh stage-II
+        output directly, same schema as ``*_poses.npz``.
+
+    Rejects
+    -------
+    ``*_stagei.npz`` — per-subject neutral-pose shape calibration, no
+        ``poses`` / ``trans`` keys.
+    ``*_stageiii.npz`` — post-hoc retargeting, inconsistent schema.
+    ``*shape*.npz`` — standalone shape files.
+    """
+    root = Path(root)
+    # Walk once, partition by suffix.
+    valid: list[Path] = []
+    for f in sorted(root.rglob("*.npz")):
+        name = f.name.lower()
+        if name.endswith(("_poses.npz", "_stageii.npz")):
+            valid.append(f)
+    return valid
+
+
 def amass_to_smpl72(poses_amass: np.ndarray) -> np.ndarray:
     """Convert AMASS SMPL-H poses ``(T, 156)`` to SMPL-24 axis-angle ``(T, 72)``.
 
@@ -120,7 +173,7 @@ def smpl_forward(
     import smplx  # imported lazily so the package is inspectable without it
 
     body_model = smplx.create(
-        model_path,
+        _resolve_smplx_model_path(model_path),
         model_type="smpl",
         gender=gender,
         num_betas=10,
@@ -384,7 +437,22 @@ def synthesize_file(
     """
     layout, mode = resolve_layout(layout_name, ssm_json_path, placement)
 
-    seq = np.load(npz_path, allow_pickle=True)
+    try:
+        seq = np.load(npz_path, allow_pickle=True)
+    except (OSError, ValueError, Exception) as exc:  # noqa: BLE001
+        # A few AMASS files are corrupt upstream (bad zip headers, truncated
+        # writes). Skip rather than crash the whole synthesis run.
+        print(f"[synthesize] skip unreadable {npz_path.name}: "
+              f"{exc.__class__.__name__}: {exc}")
+        return False
+
+    # Some corrupt files parse as NPZ but are missing keys we need.
+    required = {"poses", "betas", "trans"}
+    missing = required - set(seq.files)
+    if missing:
+        print(f"[synthesize] skip {npz_path.name}: missing keys {missing}")
+        return False
+
     poses_amass = np.asarray(seq["poses"]).astype(np.float32)
     betas = np.asarray(seq["betas"]).astype(np.float32)
     trans = np.asarray(seq["trans"]).astype(np.float32)

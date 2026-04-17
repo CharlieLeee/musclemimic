@@ -141,9 +141,15 @@ def check_amass(amass_root: Path | None, deep_validate: bool = False) -> bool:
         )
         return False
 
-    npz_per_subset = {d: list((amass_root / d).rglob("*.npz")) for d in overlap}
+    # Accept both modern *_poses.npz and older *_stageii.npz (ACCAD etc.).
+    # Delegate to the shared filter in csd2smpl.data.synthesize so preflight
+    # and synthesis always agree on which files are usable.
+    from csd2smpl.data.synthesize import amass_sequence_files
+
+    npz_per_subset = {d: amass_sequence_files(amass_root / d) for d in overlap}
     n_total = sum(len(v) for v in npz_per_subset.values())
-    _ok(f"{len(overlap)} sub-datasets present, {n_total} *.npz files total")
+    _ok(f"{len(overlap)} sub-datasets present, {n_total} sequence NPZs total "
+        f"(*_poses.npz or *_stageii.npz)")
     for d, files in sorted(npz_per_subset.items()):
         marker = " (empty!)" if not files else ""
         print(f"      {d:25s} {len(files):5d} sequences{marker}")
@@ -178,13 +184,23 @@ def check_amass(amass_root: Path | None, deep_validate: bool = False) -> bool:
                 bad.append((f, f"{exc.__class__.__name__}: {exc}"))
 
     if bad:
-        _fail(f"{len(bad)}/{sampled} sampled NPZs failed validation:")
+        # A handful of AMASS files are known to be corrupt upstream (rare but
+        # real — bad zip headers, truncated writes in the original MoSh run).
+        # Downstream synthesis skips them with a warning. Preflight should
+        # only block when the corruption rate is catastrophic, not for a
+        # one-off in a small sample.
+        rate = len(bad) / max(sampled, 1)
+        level = _fail if rate > 0.5 else _warn
+        level(f"{len(bad)}/{sampled} sampled NPZs failed validation "
+              f"(synthesis will skip them):")
         for f, why in bad[:5]:
             print(f"      {f.relative_to(amass_root)}  --  {why}")
         if len(bad) > 5:
             print(f"      ... and {len(bad) - 5} more")
-        return False
-    _ok(f"sampled {sampled} NPZs across all subsets, schema OK")
+        if rate > 0.5:
+            return False
+    _ok(f"sampled {sampled} NPZs across all subsets, "
+        f"{sampled - len(bad)}/{sampled} schema-valid")
     return True
 
 

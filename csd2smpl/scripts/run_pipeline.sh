@@ -55,6 +55,9 @@ mkdir -p "$CSD_HOME" "$AMASS_DIR" "$SMPL_DIR" "$MARKERS_DIR" \
 # Reduce CUDA fragmentation in shared scenarios.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 
+# Line-buffer Python stdout/stderr so `tee` sees progress live, not in chunks.
+export PYTHONUNBUFFERED=1
+
 # Activate venv if present (setup_cluster.sh creates it).
 if [[ -f "$VENV/bin/activate" ]]; then
     # shellcheck disable=SC1091
@@ -151,7 +154,16 @@ if should_run extract; then
                 echo "  unpacking $body -> $SMPL_DIR"
                 mkdir -p "$SMPL_DIR"
                 case "$body" in
-                    *.zip)            unzip -q -o "$body" -d "$SMPL_DIR" ;;
+                    *.zip)
+                        if command -v unzip >/dev/null 2>&1; then
+                            unzip -q -o "$body" -d "$SMPL_DIR"
+                        else
+                            # Fall back to Python's zipfile module when unzip
+                            # isn't installed (common on minimal cluster images).
+                            echo "  unzip not found; using python -m zipfile"
+                            python -m zipfile -e "$body" "$SMPL_DIR"
+                        fi
+                        ;;
                     *.tar.bz2|*.tbz2) tar -xjf "$body" -C "$SMPL_DIR" ;;
                     *.tar.gz|*.tgz)   tar -xzf "$body" -C "$SMPL_DIR" ;;
                     *.tar.xz)         tar -xJf "$body" -C "$SMPL_DIR" ;;

@@ -16,13 +16,21 @@ Usage
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 import sys
 
 from wandb.util import np
 from warp import torch
 
-from csd2smpl.data.synthesize import synthesize_file
+from csd2smpl.data.synthesize import amass_sequence_files, synthesize_file
+
+
+def _fmt_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}h{m:02d}m{s:02d}s" if h else f"{m:d}m{s:02d}s"
 from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, smpl_forward, compute_loss
 import ezc3d
 
@@ -96,17 +104,24 @@ def main() -> None:
     # Stage 1 – synthesize marker NPZs from AMASS
     # ------------------------------------------------------------------ #
 
-    npz_files = sorted(args.amass_root.rglob("*_poses.npz"))
-    if not npz_files:
-        npz_files = sorted(args.amass_root.rglob("*.npz"))
-    print(f"Found {len(npz_files)} AMASS sequences under {args.amass_root}")
-    print(f"Marker layout: {args.layout}  placement: {args.placement}  ssm: {args.ssm_json}")
+    npz_files = amass_sequence_files(args.amass_root)
+    total = len(npz_files)
+    print(f"Found {total} AMASS sequences under {args.amass_root}", flush=True)
+    print(
+        f"Marker layout: {args.layout}  placement: {args.placement}  "
+        f"ssm: {args.ssm_json}",
+        flush=True,
+    )
 
     n_written = 0
+    n_skipped = 0
+    t_start = time.perf_counter()
+    t_last_log = t_start
     for i, src in enumerate(npz_files):
         rel = src.relative_to(args.amass_root)
         dst = args.out_root / rel.with_suffix(".markers.npz")
-        if synthesize_file(
+        t_seq = time.perf_counter()
+        wrote = synthesize_file(
             npz_path=src,
             out_path=dst,
             model_path=args.model_path,
@@ -117,26 +132,33 @@ def main() -> None:
             dropout_p=args.dropout_p,
             target_fps=args.target_fps,
             device=args.device,
-        ):
-            n_written += 1
-        if i % 500 == 0:
-            print(f"  {i}/{len(npz_files)}: {rel}")
-
-    print(f"Done. Wrote {n_written}/{len(npz_files)} files to {args.out_root}")
-
-
-    # ------------------------------------------------------------------ #
-    # Stage 2 – C3D → SMPLpred inference (only if both flags are provided)
-    # ------------------------------------------------------------------ #
-    if args.c3d_file is not None and args.amass_file is not None:
-        print("\n--- Running C3D → SMPLpred inference ---")
-        run_c3d_to_smpl(args.c3d_file, args.amass_file)
-    elif args.c3d_file is not None or args.amass_file is not None:
-        print(
-            "Warning: both --c3d_file and --amass_file must be provided together "
-            "to run C3D → SMPLpred inference. Skipping."
         )
- 
+        if wrote:
+            n_written += 1
+        else:
+            n_skipped += 1
+
+        now = time.perf_counter()
+        done = i + 1
+        elapsed = now - t_start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        eta = (total - done) / rate if rate > 0 else 0.0
+        # Always log the first few, then throttle to once per 5 s.
+        if done <= 3 or now - t_last_log >= 5.0 or done == total:
+            print(
+                f"  [{done:>4d}/{total}] wrote={n_written} skipped={n_skipped} "
+                f"seq={now - t_seq:5.2f}s elapsed={_fmt_eta(elapsed)} "
+                f"ETA={_fmt_eta(eta)}  {rel}",
+                flush=True,
+            )
+            t_last_log = now
+
+    total_elapsed = time.perf_counter() - t_start
+    print(
+        f"Done in {_fmt_eta(total_elapsed)}. Wrote {n_written}/{total} "
+        f"(skipped {n_skipped}) to {args.out_root}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
