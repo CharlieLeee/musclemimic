@@ -1,83 +1,64 @@
 # csd2smpl → musclemimic example
 
 End-to-end walk-through that turns **one** csd2smpl prediction into both a
-raw SMPL skeleton video and a musclemimic mujoco video.
+raw SMPL skeleton video and a musclemimic mujoco video. The two renderers
+are pipeline steps (`visualize`, `render_mujoco`) in
+`csd2smpl/scripts/run_pipeline.sh`, so regeneration is a single command.
 
 ## What's committed here
 
 | File | Source |
 | --- | --- |
-| `example.pred.npz` | one copy of a `*.pred.npz` from a training run |
-| `example.png` | frame 0 of the SMPL skeleton render |
-| `example.mp4` | full SMPL skeleton animation |
-| `example_muscle.mp4` | musclemimic mujoco playback |
+| `example.pred.npz` | one `*.pred.npz` from a training run (auto-seeded) |
+| `example.png` | frame 0 of the SMPL-24 skeleton render |
+| `example.mp4` | 10 s SMPL skeleton animation |
+| `example_muscle.mp4` | musclemimic mujoco playback (MyoFullBody retarget) |
 
-Full-resolution mp4s are kept short (≤10 s) so they stay under GitHub's
-50 MB hard limit. Regenerate with the commands below if you want the full
-sequence at higher dpi.
+Videos are capped short (≤10 s @ 30 fps) so they stay under GitHub's 50 MB
+limit. If the mujoco mp4 still exceeds ~25 MB, drop `--n-steps` in the
+`render_mujoco` step of the pipeline script.
 
-## 1. Pick a prediction and copy it into the repo
-
-Ran on the cluster (`cd ~/musclemimic`):
+## One-shot regeneration (recommended)
 
 ```bash
-# pick the first prediction file from the train split run
-SRC=$(find $HOME/csd2smpl/predictions -name '*.pred.npz' | head -1)
-echo "using: $SRC"
-cp "$SRC" csd2smpl/examples/example.pred.npz
+bash csd2smpl/scripts/run_pipeline.sh --only visualize
+bash csd2smpl/scripts/run_pipeline.sh --only render_mujoco
 ```
 
-## 2. Render the raw SMPL skeleton (Part 1)
+Both steps are idempotent — they skip if the output files already exist.
+Delete the artefact and rerun to regenerate.
 
-No mujoco, no retargeting — just `smplx` + matplotlib.
+## Running the two renderers manually
 
 ```bash
-pip install matplotlib "imageio[ffmpeg]>=2.34"   # one-time, if missing
-
+# 1) SMPL skeleton (smplx + matplotlib + imageio — no mujoco)
 python -m csd2smpl.scripts.visualize_pred \
     --pred_npz csd2smpl/examples/example.pred.npz \
     --smpl_dir $HOME/csd2smpl/body_models/smpl \
     --out_dir  csd2smpl/examples \
     --max_frames 300 --fps 30
-```
 
-Outputs `csd2smpl/examples/example.png` + `example.mp4`.
-
-## 3. Render the musclemimic mujoco video (Part 2)
-
-Two steps: repack the prediction into AMASS schema, then call the existing
-`retarget_visualize.py` viewer against it.
-
-```bash
-# a) write an AMASS-compatible NPZ under the AMASS root
+# 2) musclemimic mujoco render (slow first run — retarget + cache)
 python -m csd2smpl.scripts.pred_to_amass \
     --pred_npz   csd2smpl/examples/example.pred.npz \
     --amass_root $HOME/csd2smpl/amass \
-    --subset     CsdPred \
-    --motion     example \
-    --fps        30
+    --subset CsdPred --motion example --fps 30
 
-# b) point musclemimic at that AMASS root and render
 AMASS_PATH=$HOME/csd2smpl/amass \
 python examples/retargeting/retarget_visualize.py \
-    --motion "CsdPred/example_poses" \
-    --record \
+    --motion "CsdPred/example_poses" --record \
     --n-episodes 1 --n-steps 300 \
     --output-dir csd2smpl/examples/_mujoco_raw \
     --video-name example_muscle
-
-# c) copy the mp4 up one level so git tracks it in a stable path
-cp csd2smpl/examples/_mujoco_raw/myofullbody_retargeted/example_muscle.mp4 \
+cp csd2smpl/examples/_mujoco_raw/*/example_muscle*.mp4 \
    csd2smpl/examples/example_muscle.mp4
 rm -rf csd2smpl/examples/_mujoco_raw
 ```
 
-First invocation triggers the SMPL→muscle-body retargeting pass (slow — minutes).
-Subsequent runs reuse the cache under `$HOME/.musclemimic/caches/`.
-
-## 4. Commit the artifacts
+## Commit + view locally
 
 ```bash
+ls -lh csd2smpl/examples/
 git add csd2smpl/examples/example.pred.npz \
         csd2smpl/examples/example.png \
         csd2smpl/examples/example.mp4 \
@@ -86,9 +67,4 @@ git commit -m "example: add one csd2smpl prediction + SMPL and mujoco videos"
 git push
 ```
 
-## 5. Pull + view locally
-
-```bash
-git pull
-# open the mp4s in any player; example.png renders in any image viewer
-```
+On your laptop: `git pull`, open the `.mp4`s in any player.

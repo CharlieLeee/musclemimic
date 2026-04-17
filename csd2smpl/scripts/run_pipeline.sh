@@ -7,7 +7,8 @@
 # Usage:
 #   bash csd2smpl/scripts/run_pipeline.sh [--from STEP] [--only STEP]
 #
-# Steps (in order): inspect | extract | preflight | synthesize | train | predict
+# Steps (in order): inspect | extract | fetch_external | preflight |
+#                   synthesize | train | predict | visualize | render_mujoco
 #
 # Examples:
 #   bash csd2smpl/scripts/run_pipeline.sh                  # full pipeline
@@ -42,6 +43,8 @@ PRED_DIR="${PRED_DIR:-$CSD_HOME/predictions}"
 LOG_DIR="${LOG_DIR:-$CSD_HOME/logs}"
 VENV="${VENV:-$REPO_ROOT/.venv}"
 CONFIG="${CONFIG:-csd2smpl/configs/v100_3way.yaml}"
+# Gittable example artefacts produced by the visualize + render_mujoco steps.
+EXAMPLE_DIR="${EXAMPLE_DIR:-$REPO_ROOT/csd2smpl/examples}"
 
 # Refuse to write outside /home.
 case "$CSD_HOME" in
@@ -65,7 +68,7 @@ if [[ -f "$VENV/bin/activate" ]]; then
 fi
 
 # ── CLI parsing ───────────────────────────────────────────────
-ALL_STEPS=(inspect extract fetch_external preflight synthesize train predict)
+ALL_STEPS=(inspect extract fetch_external preflight synthesize train predict visualize render_mujoco)
 FROM_STEP=""
 ONLY_STEP=""
 
@@ -249,16 +252,104 @@ if should_run train; then
 fi
 
 # ── Step: predict ─────────────────────────────────────────────
+# Default to `train` because the stock cluster setup only has ACCAD/BML
+# extracted, which are both train-split; the test split ends up empty and
+# predict silently writes 0 files. Override with PREDICT_SPLIT=test if you've
+# extracted Transitions_mocap / SSM_synced.
+PREDICT_SPLIT="${PREDICT_SPLIT:-train}"
 if should_run predict; then
     if [[ ! -f "$CKPT_DIR/best.pt" ]]; then
         echo "[predict] no checkpoint at $CKPT_DIR/best.pt — train first" >&2
         exit 1
     fi
-    run_log predict python -m csd2smpl.predict \
-        --config "$CONFIG" \
-        --ckpt   "$CKPT_DIR/best.pt" \
-        --split  test \
-        --out    "$PRED_DIR"
+    if [[ -n "$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)" ]]; then
+        echo "[predict] predictions already present under $PRED_DIR (skip; rm to regenerate)"
+    else
+        run_log predict python -m csd2smpl.predict \
+            --config "$CONFIG" \
+            --ckpt   "$CKPT_DIR/best.pt" \
+            --split  "$PREDICT_SPLIT" \
+            --out    "$PRED_DIR"
+    fi
+fi
+
+# ── Step: visualize ───────────────────────────────────────────
+# Render a single prediction as an SMPL-24 skeleton PNG + MP4 for committing
+# under csd2smpl/examples/. Uses smplx (already required) + matplotlib +
+# imageio; both are in requirements.txt.
+EXAMPLE_PRED="$EXAMPLE_DIR/example.pred.npz"
+if should_run visualize; then
+    if [[ -f "$EXAMPLE_DIR/example.png" && -f "$EXAMPLE_DIR/example.mp4" ]]; then
+        echo "[visualize] $EXAMPLE_DIR/example.{png,mp4} exist (skip; rm to regenerate)"
+    else
+        mkdir -p "$EXAMPLE_DIR"
+        if [[ ! -f "$EXAMPLE_PRED" ]]; then
+            src="$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)"
+            if [[ -z "$src" ]]; then
+                echo "[visualize] no .pred.npz under $PRED_DIR — run predict first" >&2
+                exit 1
+            fi
+            echo "[visualize] seeding $EXAMPLE_PRED from $src"
+            cp "$src" "$EXAMPLE_PRED"
+        fi
+        run_log visualize python -m csd2smpl.scripts.visualize_pred \
+            --pred_npz   "$EXAMPLE_PRED" \
+            --smpl_dir   "$SMPL_DIR" \
+            --out_dir    "$EXAMPLE_DIR" \
+            --max_frames 300 --fps 30
+        # visualize_pred names outputs from the input stem; normalise to "example.*".
+        stem="$(basename "${EXAMPLE_PRED%.pred.npz}")"
+        stem="${stem%.pred}"
+        for ext in png mp4; do
+            if [[ "$stem" != "example" && -f "$EXAMPLE_DIR/${stem}.${ext}" ]]; then
+                mv "$EXAMPLE_DIR/${stem}.${ext}" "$EXAMPLE_DIR/example.${ext}"
+            fi
+        done
+    fi
+fi
+
+# ── Step: render_mujoco ───────────────────────────────────────
+# Repack the example prediction into AMASS schema, then drive the musclemimic
+# MyoFullBody retarget viewer to produce a mujoco mp4. First invocation runs
+# the SMPL→muscle-body optimisation (slow; cached to ~/.musclemimic/caches).
+if should_run render_mujoco; then
+    if [[ -f "$EXAMPLE_DIR/example_muscle.mp4" ]]; then
+        echo "[render_mujoco] $EXAMPLE_DIR/example_muscle.mp4 exists (skip; rm to regenerate)"
+    else
+        if [[ ! -f "$EXAMPLE_PRED" ]]; then
+            src="$(find "$PRED_DIR" -name '*.pred.npz' 2>/dev/null | head -1)"
+            if [[ -z "$src" ]]; then
+                echo "[render_mujoco] no .pred.npz under $PRED_DIR — run predict first" >&2
+                exit 1
+            fi
+            mkdir -p "$EXAMPLE_DIR"
+            echo "[render_mujoco] seeding $EXAMPLE_PRED from $src"
+            cp "$src" "$EXAMPLE_PRED"
+        fi
+        run_log render_mujoco_repack python -m csd2smpl.scripts.pred_to_amass \
+            --pred_npz   "$EXAMPLE_PRED" \
+            --amass_root "$AMASS_DIR" \
+            --subset CsdPred --motion example --fps 30
+
+        raw_out="$EXAMPLE_DIR/_mujoco_raw"
+        rm -rf "$raw_out"
+        AMASS_PATH="$AMASS_DIR" run_log render_mujoco_viewer \
+            python "$REPO_ROOT/examples/retargeting/retarget_visualize.py" \
+                --motion "CsdPred/example_poses" \
+                --record --n-episodes 1 --n-steps 300 \
+                --output-dir "$raw_out" \
+                --video-name example_muscle
+
+        # retarget_visualize nests the mp4 under <tag>/<name>.mp4; find and hoist it.
+        found="$(find "$raw_out" -name 'example_muscle*.mp4' 2>/dev/null | head -1)"
+        if [[ -z "$found" ]]; then
+            echo "[render_mujoco] no mp4 produced under $raw_out" >&2
+            exit 1
+        fi
+        cp "$found" "$EXAMPLE_DIR/example_muscle.mp4"
+        rm -rf "$raw_out"
+        echo "[render_mujoco] wrote $EXAMPLE_DIR/example_muscle.mp4"
+    fi
 fi
 
 echo ""
@@ -267,4 +358,5 @@ echo "  amass     : $AMASS_DIR"
 echo "  markers   : $MARKERS_DIR"
 echo "  ckpt      : $CKPT_DIR/best.pt"
 echo "  preds     : $PRED_DIR"
+echo "  examples  : $EXAMPLE_DIR"
 echo "  logs      : $LOG_DIR"
