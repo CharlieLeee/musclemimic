@@ -83,7 +83,18 @@ def main() -> None:
     parser.add_argument("--dropout_p", type=float, default=0.05)
     parser.add_argument("--target_fps", type=float, default=30.0)
     parser.add_argument("--device", default="cpu")
+
+    # --- C3D → SMPLpred args (optional) ---
+    parser.add_argument("--c3d_file", type=str, default=None,
+                        help="Path to a C3D file for SMPLpred inference (optional)")
+    parser.add_argument("--amass_file", type=str, default=None,
+                        help="Path to the corresponding AMASS .npz ground-truth file (optional)")
+
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------ #
+    # Stage 1 – synthesize marker NPZs from AMASS
+    # ------------------------------------------------------------------ #
 
     npz_files = sorted(args.amass_root.rglob("*_poses.npz"))
     if not npz_files:
@@ -113,6 +124,19 @@ def main() -> None:
 
     print(f"Done. Wrote {n_written}/{len(npz_files)} files to {args.out_root}")
 
+
+    # ------------------------------------------------------------------ #
+    # Stage 2 – C3D → SMPLpred inference (only if both flags are provided)
+    # ------------------------------------------------------------------ #
+    if args.c3d_file is not None and args.amass_file is not None:
+        print("\n--- Running C3D → SMPLpred inference ---")
+        run_c3d_to_smpl(args.c3d_file, args.amass_file)
+    elif args.c3d_file is not None or args.amass_file is not None:
+        print(
+            "Warning: both --c3d_file and --amass_file must be provided together "
+            "to run C3D → SMPLpred inference. Skipping."
+        )
+ 
 
 
 if __name__ == "__main__":
