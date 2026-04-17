@@ -18,12 +18,13 @@ from __future__ import annotations
 import argparse
 import time
 from pathlib import Path
-import sys
 
-from wandb.util import np
-from warp import torch
+import ezc3d
+import numpy as np
+import torch
 
 from csd2smpl.data.synthesize import amass_sequence_files, synthesize_file
+from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, compute_loss, smpl_forward
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -31,8 +32,6 @@ def _fmt_eta(seconds: float) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h:d}h{m:02d}m{s:02d}s" if h else f"{m:d}m{s:02d}s"
-from csd2smpl.scripts.c2d_to_SMPLpred import MarkerToSMPL, smpl_forward, compute_loss
-import ezc3d
 
 
 def run_c3d_to_smpl(c3d_file: str, amass_file: str) -> None:
