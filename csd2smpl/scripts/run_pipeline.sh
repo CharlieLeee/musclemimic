@@ -46,6 +46,12 @@ CONFIG="${CONFIG:-csd2smpl/configs/v100_3way.yaml}"
 # Gittable example artefacts produced by the visualize + render_mujoco steps.
 EXAMPLE_DIR="${EXAMPLE_DIR:-$REPO_ROOT/csd2smpl/examples}"
 
+# Keep every musclemimic artefact (caches, optimised shapes, configs) under
+# $CSD_HOME so nothing tries to write to ~/.musclemimic — on this cluster
+# Path.home() expands to /home, which is not writable.
+export MUSCLEMIMIC_HOME="${MUSCLEMIMIC_HOME:-$CSD_HOME/.musclemimic}"
+export MUSCLEMIMIC_SMPL_MODEL_PATH="${MUSCLEMIMIC_SMPL_MODEL_PATH:-$SMPL_DIR}"
+
 # Refuse to write outside /home.
 case "$CSD_HOME" in
     /home/*) ;;
@@ -53,7 +59,7 @@ case "$CSD_HOME" in
 esac
 
 mkdir -p "$CSD_HOME" "$AMASS_DIR" "$SMPL_DIR" "$MARKERS_DIR" \
-         "$CKPT_DIR" "$PRED_DIR" "$LOG_DIR"
+         "$CKPT_DIR" "$PRED_DIR" "$LOG_DIR" "$MUSCLEMIMIC_HOME"
 
 # Reduce CUDA fragmentation in shared scenarios.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
@@ -140,7 +146,7 @@ if should_run extract; then
     fi
 
     # Body model: look for any tarball/zip whose name hints at SMPL.
-    if [[ -n "$(find "$SMPL_DIR" -maxdepth 2 -name '*.pkl' -print -quit 2>/dev/null)" ]]; then
+    if [[ -n "$(find "$SMPL_DIR" -maxdepth 1 -name 'SMPL_*.pkl' -print -quit 2>/dev/null)" ]]; then
         echo "[extract] SMPL .pkl already present under $SMPL_DIR (skip)"
     else
         echo "[extract] Looking for SMPL body-model archive in $RAW_DIR ..."
@@ -148,6 +154,17 @@ if should_run extract; then
         body_archives=( "$RAW_DIR"/*smpl*.zip "$RAW_DIR"/*smpl*.tar.bz2 \
                         "$RAW_DIR"/*smpl*.tar.gz "$RAW_DIR"/*smpl*.tar.xz \
                         "$RAW_DIR"/*smpl*.tar    "$RAW_DIR"/*smpl*.tbz2 )
+        # Exclude SMPL-H and MANO archives — those are handled in their own
+        # blocks below.
+        _filtered=()
+        for _f in "${body_archives[@]}"; do
+            _b="$(basename "$_f" | tr '[:upper:]' '[:lower:]')"
+            case "$_b" in
+                *smplh*|*smpl+h*|*smpl_h*|mano*|*_uv_*) ;;
+                *) _filtered+=("$_f") ;;
+            esac
+        done
+        body_archives=("${_filtered[@]}")
         shopt -u nullglob nocaseglob
         if [[ "${#body_archives[@]}" -eq 0 ]]; then
             echo "[extract] WARNING: no SMPL body-model archive in $RAW_DIR" >&2
@@ -200,6 +217,111 @@ if should_run extract; then
         if [[ -z "$(find "$SMPL_DIR" -maxdepth 1 -name 'SMPL_*.pkl' -print -quit 2>/dev/null)" ]]; then
             echo "[extract] WARNING: no SMPL_*.pkl at top of $SMPL_DIR after extraction" >&2
         fi
+    fi
+
+    # ── SMPL-H body model (needed by the render_mujoco viewer) ──
+    # musclemimic's SMPLH_Parser needs SMPLH_NEUTRAL.pkl in $SMPL_DIR.
+    # That file is built from the MPI SMPL-H body (smplh.tar.xz → neutral/model.npz)
+    # plus the MANO hand components (mano_v1_2.zip → MANO_{LEFT,RIGHT}.pkl).
+    # The MANO_UV_*.obj files are mesh UV-unwraps, NOT the model — ignore them.
+    if [[ -f "$SMPL_DIR/smplh/neutral/model.npz" ]]; then
+        echo "[extract] SMPL-H already extracted under $SMPL_DIR/smplh (skip)"
+    else
+        shopt -s nullglob nocaseglob
+        smplh_archives=( "$RAW_DIR"/*smplh*.tar.xz "$RAW_DIR"/*smplh*.tar.bz2 \
+                         "$RAW_DIR"/*smplh*.tar.gz "$RAW_DIR"/*smplh*.tar \
+                         "$RAW_DIR"/*smplh*.zip )
+        shopt -u nullglob nocaseglob
+        if [[ "${#smplh_archives[@]}" -eq 0 ]]; then
+            echo "[extract] WARNING: no SMPL-H archive in $RAW_DIR" >&2
+            echo "          download smplh.tar.xz from https://mano.is.tue.mpg.de/ (Models & Code → SMPL+H)" >&2
+        else
+            mkdir -p "$SMPL_DIR/smplh"
+            for body in "${smplh_archives[@]}"; do
+                echo "  unpacking $body -> $SMPL_DIR/smplh"
+                case "$body" in
+                    *.tar.xz)  tar -xJf "$body" -C "$SMPL_DIR/smplh" ;;
+                    *.tar.bz2) tar -xjf "$body" -C "$SMPL_DIR/smplh" ;;
+                    *.tar.gz)  tar -xzf "$body" -C "$SMPL_DIR/smplh" ;;
+                    *.tar)     tar -xf  "$body" -C "$SMPL_DIR/smplh" ;;
+                    *.zip)
+                        if command -v unzip >/dev/null 2>&1; then
+                            unzip -q -o "$body" -d "$SMPL_DIR/smplh"
+                        else
+                            python -m zipfile -e "$body" "$SMPL_DIR/smplh"
+                        fi
+                        ;;
+                esac
+                break
+            done
+            if [[ ! -f "$SMPL_DIR/smplh/neutral/model.npz" ]]; then
+                echo "[extract] WARNING: $SMPL_DIR/smplh/neutral/model.npz missing after extraction" >&2
+            fi
+        fi
+    fi
+
+    # ── MANO hand components (needed for SMPLH_NEUTRAL.pkl assembly) ──
+    if [[ -f "$SMPL_DIR/mano_v1_2/models/MANO_LEFT.pkl" \
+       && -f "$SMPL_DIR/mano_v1_2/models/MANO_RIGHT.pkl" ]]; then
+        echo "[extract] MANO already extracted under $SMPL_DIR/mano_v1_2 (skip)"
+    else
+        shopt -s nullglob nocaseglob
+        mano_archives=( "$RAW_DIR"/mano_v1_2.zip "$RAW_DIR"/mano*.zip \
+                        "$RAW_DIR"/mano*.tar.gz "$RAW_DIR"/mano*.tar.xz \
+                        "$RAW_DIR"/mano*.tar.bz2 )
+        # The MANO_UV_*.obj files on the MPI site are mesh UV maps, not model
+        # parameters — exclude any filename with _UV_ in it.
+        _filtered=()
+        for _f in "${mano_archives[@]}"; do
+            case "$(basename "$_f" | tr '[:upper:]' '[:lower:]')" in
+                *_uv_*|*.obj) ;;
+                *) _filtered+=("$_f") ;;
+            esac
+        done
+        mano_archives=("${_filtered[@]}")
+        shopt -u nullglob nocaseglob
+        if [[ "${#mano_archives[@]}" -eq 0 ]]; then
+            echo "[extract] WARNING: no MANO archive in $RAW_DIR" >&2
+            echo "          download mano_v1_2.zip from https://mano.is.tue.mpg.de/ (Models & Code → MANO)" >&2
+            echo "          (MANO_UV_*.obj files are NOT the model — they are mesh UV maps)" >&2
+        else
+            for body in "${mano_archives[@]}"; do
+                echo "  unpacking $body -> $SMPL_DIR"
+                case "$body" in
+                    *.zip)
+                        if command -v unzip >/dev/null 2>&1; then
+                            unzip -q -o "$body" -d "$SMPL_DIR"
+                        else
+                            python -m zipfile -e "$body" "$SMPL_DIR"
+                        fi
+                        ;;
+                    *.tar.xz)  tar -xJf "$body" -C "$SMPL_DIR" ;;
+                    *.tar.bz2) tar -xjf "$body" -C "$SMPL_DIR" ;;
+                    *.tar.gz)  tar -xzf "$body" -C "$SMPL_DIR" ;;
+                esac
+                break
+            done
+            if [[ ! -f "$SMPL_DIR/mano_v1_2/models/MANO_LEFT.pkl" ]]; then
+                echo "[extract] WARNING: MANO_LEFT.pkl missing after extraction — check archive layout" >&2
+            fi
+        fi
+    fi
+
+    # ── Build SMPLH_NEUTRAL.pkl (body + hands merged, read by SMPLH_Parser) ──
+    if [[ -f "$SMPL_DIR/SMPLH_NEUTRAL.pkl" ]]; then
+        echo "[extract] $SMPL_DIR/SMPLH_NEUTRAL.pkl exists (skip)"
+    elif [[ -f "$SMPL_DIR/smplh/neutral/model.npz" \
+         && -f "$SMPL_DIR/mano_v1_2/models/MANO_LEFT.pkl" \
+         && -f "$SMPL_DIR/mano_v1_2/models/MANO_RIGHT.pkl" ]]; then
+        tmpconf="$(mktemp --suffix=.yaml)"
+        printf 'MUSCLEMIMIC_SMPL_MODEL_PATH: "%s"\n' "$SMPL_DIR" > "$tmpconf"
+        run_log build_smplh python -m loco_mujoco.smpl.generate_smplh_model \
+            --smpl-conf-file "$tmpconf"
+        rm -f "$tmpconf"
+    else
+        echo "[extract] WARNING: cannot build SMPLH_NEUTRAL.pkl (missing inputs)" >&2
+        echo "          need $SMPL_DIR/smplh/neutral/model.npz" >&2
+        echo "          and  $SMPL_DIR/mano_v1_2/models/MANO_{LEFT,RIGHT}.pkl" >&2
     fi
 fi
 
@@ -333,12 +455,21 @@ if should_run render_mujoco; then
 
         raw_out="$EXAMPLE_DIR/_mujoco_raw"
         rm -rf "$raw_out"
-        AMASS_PATH="$AMASS_DIR" run_log render_mujoco_viewer \
-            python "$REPO_ROOT/examples/retargeting/retarget_visualize.py" \
-                --motion "CsdPred/example_poses" \
-                --record --n-episodes 1 --n-steps 300 \
-                --output-dir "$raw_out" \
-                --video-name example_muscle
+        if [[ ! -f "$SMPL_DIR/SMPLH_NEUTRAL.pkl" ]]; then
+            echo "[render_mujoco] ERROR: $SMPL_DIR/SMPLH_NEUTRAL.pkl missing." >&2
+            echo "                Re-run the extract step after placing smplh.tar.xz" >&2
+            echo "                and mano_v1_2.zip under $RAW_DIR." >&2
+            exit 1
+        fi
+        AMASS_PATH="$AMASS_DIR" \
+        MUSCLEMIMIC_SMPL_MODEL_PATH="$SMPL_DIR" \
+        MUSCLEMIMIC_HOME="$MUSCLEMIMIC_HOME" \
+            run_log render_mujoco_viewer \
+                python "$REPO_ROOT/examples/retargeting/retarget_visualize.py" \
+                    --motion "CsdPred/example_poses" \
+                    --record --n-episodes 1 --n-steps 300 \
+                    --output-dir "$raw_out" \
+                    --video-name example_muscle
 
         # retarget_visualize nests the mp4 under <tag>/<name>.mp4; find and hoist it.
         found="$(find "$raw_out" -name 'example_muscle*.mp4' -print -quit 2>/dev/null)"
