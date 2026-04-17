@@ -62,8 +62,21 @@ def _smpl_forward(
         ) from exc
 
     dev = torch.device(device)
-    body = smplx.create(
-        model_path=str(smpl_dir), model_type="smpl", gender=gender,
+    # smplx.create appends model_type to model_path; we want the pkl path direct
+    # so the script works whether pkls live at <smpl_dir>/SMPL_*.pkl (our layout)
+    # or <smpl_dir>/smpl/SMPL_*.pkl (smplx's default layout).
+    pkl_candidates = [
+        Path(smpl_dir) / f"SMPL_{gender.upper()}.pkl",
+        Path(smpl_dir) / "smpl" / f"SMPL_{gender.upper()}.pkl",
+    ]
+    pkl_path = next((p for p in pkl_candidates if p.exists()), None)
+    if pkl_path is None:
+        raise FileNotFoundError(
+            f"SMPL_{gender.upper()}.pkl not found. Looked in: "
+            + ", ".join(str(p) for p in pkl_candidates)
+        )
+    body = smplx.SMPL(
+        model_path=str(pkl_path), gender=gender,
         batch_size=pred_poses.shape[0],
     ).to(dev)
 
